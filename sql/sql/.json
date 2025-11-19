@@ -1,0 +1,94 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "serverName": {
+      "value": "voa-iaz-sql-prd-datamig"
+    },
+    "location": {
+      "value": "eastus"
+    },
+    "administratorLogin": {
+      "value": "sqladmin"
+    },
+    "administratorLoginPassword": {
+      "value": "YourSecurePassword123!"
+    },
+    "administrators": {
+      "value": {
+        "administratorType": "ActiveDirectory",
+        "principalType": "Group",
+        "login": "SQL Administrators",
+        "sid": "00000000-0000-0000-0000-000000000000",
+        "tenantId": "00000000-0000-0000-0000-000000000000",
+        "azureADOnlyAuthentication": false
+      }
+    },
+    "minimalTlsVersion": {
+      "value": "1.2"
+    },
+    "publicNetworkAccess": {
+      "value": "Disabled"
+    },
+    "serverTags": {
+      "value": {
+        "Environment": "Production",
+        "Application": "DataMigration",
+        "CostCenter": "IT"
+      }
+    },
+    "allowAzureIPs": {
+      "value": true
+    },
+    "infrastructureEncryptionEnabled": {
+      "value": true
+    },
+    "cmkIdentity": {
+      "value": "/subscriptions/YOUR-SUBSCRIPTION-ID/resourceGroups/YOUR-RG/providers/Microsoft.ManagedIdentity/userAssignedIdentities/YOUR-IDENTITY-NAME"
+    },
+    "existingKeyVaultName": {
+      "value": "your-keyvault-name"
+    },
+    "existingKeyName": {
+      "value": "your-key-name"
+    },
+    "vaultBaseUrl": {
+      "value": "https://your-keyvault-name.vault.azure.net/"
+    },
+    "storageName": {
+      "value": "yourstorageaccount"
+    },
+    "storageResourceGroup": {
+      "value": "YOUR-STORAGE-RG"
+    },
+    "useVAManagedIdentity": {
+      "value": true
+    },
+    "enableVA": {
+      "value": true
+    },
+    "vaStoragelessEnabled": {
+      "value": true
+    },
+    "privateEndpointName": {
+      "value": "pe-sql-datamig"
+    },
+    "subnet": {
+      "value": "/subscriptions/YOUR-SUBSCRIPTION-ID/resourceGroups/YOUR-VNET-RG/providers/Microsoft.Network/virtualNetworks/YOUR-VNET/subnets/YOUR-SUBNET"
+    },
+    "customNetworkInterfaceName": {
+      "value": "nic-pe-sql-datamig"
+    },
+    "targetSubResource": {
+      "value": [
+        "sqlServer"
+      ]
+    },
+    "logAnalyticsWorkspaceName": {
+      "value": "your-log-analytics-workspace"
+    },
+    "privateLinkResourceId": {
+      "value": ""
+    }
+  }
+}

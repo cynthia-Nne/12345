@@ -1,0 +1,114 @@
+Fix for Adding Encryption to Your Working Template
+1. Keep Your Identity Configuration (Image 2, Line ~60)
+Your identity is fine, but modify it to support both:
+
+"identity": {
+  "type": "SystemAssigned,UserAssigned",
+  "userAssignedIdentities": {
+    "[parameters('cmkIdentity')]": {}
+  }
+}
+
+2. Add These Properties to SQL Server (After administrators)
+Add these two lines in your SQL Server properties section (around line 85 in Image 2):
+
+"administrators": "[parameters('administrators')]",
+"primaryUserAssignedIdentityId": "[if(parameters('infrastructureEncryptionEnabled'), parameters('cmkIdentity'), json('null'))]",
+"keyId": "[if(parameters('infrastructureEncryptionEnabled'), concat(parameters('vaultBaseUrl'), '/keys/', parameters('existingKeyName')), json('null'))]"
+
+3. Remove the Encryption Block
+Delete the entire encryption block (lines ~70-85 in Image 2):
+
+
+// DELETE THIS ENTIRE SECTION:
+"encryption": {
+  "infrastructureEncryption": "[parameters('infrastructureEncryptionEnabled')]",
+  "identity": {
+    "userAssignedIdentity": "[parameters('cmkIdentity')]"
+  },
+  "keyVaultProperties": {
+    "keyName": "[parameters('existingKeyName')]",
+    "keyVaultUri": "[parameters('vaultBaseUrl')]"
+  }
+}
+
+4. Add Key Vault Access Policy (Before SQL Server Resource)
+Add this as a separate resource before your SQL Server (around line 50):
+
+{
+  "type": "Microsoft.KeyVault/vaults/accessPolicies",
+  "apiVersion": "2021-11-01-preview",
+  "name": "[concat(parameters('existingKeyVaultName'), '/add')]",
+  "properties": {
+    "accessPolicies": [
+      {
+        "tenantId": "[subscription().tenantId]",
+        "objectId": "[reference(parameters('cmkIdentity'), '2023-01-31').principalId]",
+        "permissions": {
+          "keys": [
+            "get",
+            "unwrapKey",
+            "wrapKey"
+          ]
+        }
+      }
+    ]
+  },
+  "condition": "[parameters('infrastructureEncryptionEnabled')]"
+}
+
+5. Update SQL Server Dependencies
+In your SQL Server resource, update the dependsOn to include the access policy:
+
+"dependsOn": [
+  "[resourceId('Microsoft.KeyVault/vaults/accessPolicies', parameters('existingKeyVaultName'), 'add')]"
+]
+
+6. Complete SQL Server Properties Section Should Look Like:
+
+"properties": {
+  "version": "12.0",
+  "minimalTlsVersion": "[parameters('minimalTlsVersion')]",
+  "publicNetworkAccess": "[parameters('publicNetworkAccess')]",
+  "administratorLogin": "[parameters('administratorLogin')]",
+  "administratorLoginPassword": "[parameters('administratorLoginPassword')]",
+  "administrators": "[parameters('administrators')]",
+  "primaryUserAssignedIdentityId": "[if(parameters('infrastructureEncryptionEnabled'), parameters('cmkIdentity'), json('null'))]",
+  "keyId": "[if(parameters('infrastructureEncryptionEnabled'), concat(parameters('vaultBaseUrl'), '/keys/', parameters('existingKeyName')), json('null'))]"
+}
+
+"cmkIdentity": {
+  "type": "string",
+  "defaultValue": "",
+  "metadata": {
+    "description": "Resource ID of user-assigned managed identity for encryption"
+  }
+},
+"existingKeyVaultName": {
+  "type": "string",
+  "defaultValue": "",
+  "metadata": {
+    "description": "Name of existing Key Vault"
+  }
+},
+"existingKeyName": {
+  "type": "string",
+  "defaultValue": "",
+  "metadata": {
+    "description": "Key name in Key Vault"
+  }
+},
+"vaultBaseUrl": {
+  "type": "string",
+  "defaultValue": "",
+  "metadata": {
+    "description": "Key Vault URI"
+  }
+},
+"infrastructureEncryptionEnabled": {
+  "type": "bool",
+  "defaultValue": false,
+  "metadata": {
+    "description": "Enable infrastructure encryption with CMK"
+  }
+}

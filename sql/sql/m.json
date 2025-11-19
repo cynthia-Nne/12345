@@ -1,0 +1,382 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "serverName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the SQL Server"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Location for all resources"
+      }
+    },
+    "administratorLogin": {
+      "type": "string",
+      "metadata": {
+        "description": "Administrator username"
+      }
+    },
+    "administratorLoginPassword": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Administrator password"
+      }
+    },
+    "administrators": {
+      "type": "object",
+      "defaultValue": {},
+      "metadata": {
+        "description": "Azure AD administrators"
+      }
+    },
+    "minimalTlsVersion": {
+      "type": "string",
+      "defaultValue": "1.2",
+      "metadata": {
+        "description": "Minimal TLS version"
+      }
+    },
+    "publicNetworkAccess": {
+      "type": "string",
+      "defaultValue": "Enabled",
+      "allowedValues": [
+        "Enabled",
+        "Disabled"
+      ],
+      "metadata": {
+        "description": "Public network access"
+      }
+    },
+    "serverTags": {
+      "type": "object",
+      "defaultValue": {},
+      "metadata": {
+        "description": "Tags for the SQL Server"
+      }
+    },
+    "allowAzureIPs": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Allow Azure services to access server"
+      }
+    },
+    "infrastructureEncryptionEnabled": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Enable infrastructure encryption with CMK"
+      }
+    },
+    "cmkIdentity": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Resource ID of user-assigned managed identity for encryption"
+      }
+    },
+    "existingKeyVaultName": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Name of existing Key Vault"
+      }
+    },
+    "existingKeyName": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Key name in Key Vault"
+      }
+    },
+    "vaultBaseUrl": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Key Vault URI"
+      }
+    },
+    "storageName": {
+      "type": "string",
+      "metadata": {
+        "description": "Storage account name for SQL auditing"
+      }
+    },
+    "storageResourceGroup": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().name]",
+      "metadata": {
+        "description": "Resource group of storage account"
+      }
+    },
+    "useVAManagedIdentity": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Use managed identity for vulnerability assessment"
+      }
+    },
+    "enableVA": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Enable vulnerability assessment"
+      }
+    },
+    "vaStoragelessEnabled": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Enable storageless vulnerability assessment"
+      }
+    },
+    "privateEndpointName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the private endpoint"
+      }
+    },
+    "subnet": {
+      "type": "string",
+      "metadata": {
+        "description": "Subnet resource ID for private endpoint"
+      }
+    },
+    "customNetworkInterfaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Custom network interface name"
+      }
+    },
+    "targetSubResource": {
+      "type": "array",
+      "defaultValue": ["sqlServer"],
+      "metadata": {
+        "description": "Target sub-resource for private endpoint"
+      }
+    },
+    "logAnalyticsWorkspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace name for diagnostics"
+      }
+    },
+    "privateLinkResourceId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Private link service resource ID"
+      }
+    }
+  },
+  "variables": {
+    "uniqueRoleGuid": "[guid(resourceId('Microsoft.Storage/storageAccounts', parameters('storageName')), resourceId('Microsoft.Sql/servers', parameters('serverName')), 'StorageBlobDataContributor')]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.KeyVault/vaults/accessPolicies",
+      "apiVersion": "2021-11-01-preview",
+      "name": "[concat(parameters('existingKeyVaultName'), '/add')]",
+      "properties": {
+        "accessPolicies": [
+          {
+            "tenantId": "[subscription().tenantId]",
+            "objectId": "[reference(parameters('cmkIdentity'), '2023-01-31').principalId]",
+            "permissions": {
+              "keys": [
+                "get",
+                "unwrapKey",
+                "wrapKey"
+              ]
+            }
+          }
+        ]
+      },
+      "condition": "[parameters('infrastructureEncryptionEnabled')]"
+    },
+    {
+      "type": "Microsoft.Sql/servers",
+      "apiVersion": "2021-11-01",
+      "name": "[parameters('serverName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('serverTags')]",
+      "identity": {
+        "type": "[if(parameters('infrastructureEncryptionEnabled'), 'SystemAssigned,UserAssigned', 'SystemAssigned')]",
+        "userAssignedIdentities": "[if(parameters('infrastructureEncryptionEnabled'), json(concat('{\"', parameters('cmkIdentity'), '\": {}}')), json('null'))]"
+      },
+      "properties": {
+        "version": "12.0",
+        "minimalTlsVersion": "[parameters('minimalTlsVersion')]",
+        "publicNetworkAccess": "[parameters('publicNetworkAccess')]",
+        "administratorLogin": "[parameters('administratorLogin')]",
+        "administratorLoginPassword": "[parameters('administratorLoginPassword')]",
+        "administrators": "[parameters('administrators')]",
+        "primaryUserAssignedIdentityId": "[if(parameters('infrastructureEncryptionEnabled'), parameters('cmkIdentity'), json('null'))]",
+        "keyId": "[if(parameters('infrastructureEncryptionEnabled'), concat(parameters('vaultBaseUrl'), '/keys/', parameters('existingKeyName')), json('null'))]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults/accessPolicies', parameters('existingKeyVaultName'), 'add')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Sql/servers/firewallRules",
+      "apiVersion": "2021-11-01",
+      "name": "[concat(parameters('serverName'), '/AllowAllWindowsAzureIps')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Sql/servers', parameters('serverName'))]"
+      ],
+      "properties": {
+        "endIpAddress": "0.0.0.0",
+        "startIpAddress": "0.0.0.0"
+      },
+      "condition": "[parameters('allowAzureIPs')]"
+    },
+    {
+      "type": "Microsoft.Sql/servers/advancedThreatProtectionSettings",
+      "apiVersion": "2021-11-01-preview",
+      "name": "[concat(parameters('serverName'), '/Default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Sql/servers', parameters('serverName'))]"
+      ],
+      "properties": {
+        "state": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.Sql/servers/auditingSettings",
+      "apiVersion": "2021-11-01-preview",
+      "name": "[concat(parameters('serverName'), '/Default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Sql/servers', parameters('serverName'))]"
+      ],
+      "properties": {
+        "state": "Enabled",
+        "isAzureMonitorTargetEnabled": true
+      }
+    },
+    {
+      "type": "Microsoft.Sql/servers/securityAlertPolicies",
+      "apiVersion": "2022-02-01-preview",
+      "name": "[concat(parameters('serverName'), '/Default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Sql/servers', parameters('serverName'))]"
+      ],
+      "properties": {
+        "state": "Enabled"
+      },
+      "condition": "[parameters('vaStoragelessEnabled')]"
+    },
+    {
+      "type": "Microsoft.Sql/servers/vulnerabilityAssessments",
+      "apiVersion": "2018-06-01-preview",
+      "name": "[concat(parameters('serverName'), '/Default')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Sql/servers', parameters('serverName'))]",
+        "[resourceId('Microsoft.Sql/servers/securityAlertPolicies', parameters('serverName'), 'Default')]"
+      ],
+      "properties": {
+        "storageContainerPath": "[if(and(parameters('enableVA'), not(parameters('useVAManagedIdentity'))), concat(reference(resourceId(parameters('storageResourceGroup'), 'Microsoft.Storage/storageAccounts', parameters('storageName')), '2019-06-01').primaryEndpoints.blob, 'vulnerability-assessment'), json('null'))]",
+        "storageAccountAccessKey": "[if(and(parameters('enableVA'), not(parameters('useVAManagedIdentity'))), listKeys(resourceId(parameters('storageResourceGroup'), 'Microsoft.Storage/storageAccounts', parameters('storageName')), '2018-02-01').keys[0].value, json('null'))]",
+        "recurringScans": {
+          "isEnabled": true,
+          "emailSubscriptionAdmins": false
+        }
+      },
+      "condition": "[parameters('enableVA')]"
+    },
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2020-04-01-preview",
+      "name": "[variables('uniqueRoleGuid')]",
+      "scope": "[concat('Microsoft.Storage/storageAccounts/', parameters('storageName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Sql/servers', parameters('serverName'))]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Authorization/roleDefinitions/', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')]",
+        "principalId": "[reference(resourceId('Microsoft.Sql/servers', parameters('serverName')), '2021-11-01', 'Full').identity.principalId]",
+        "scope": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageName'))]",
+        "principalType": "ServicePrincipal"
+      },
+      "condition": "[parameters('useVAManagedIdentity')]"
+    },
+    {
+      "type": "Microsoft.Network/privateEndpoints",
+      "apiVersion": "2021-05-01",
+      "name": "[parameters('privateEndpointName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Sql/servers', parameters('serverName'))]"
+      ],
+      "properties": {
+        "subnet": {
+          "id": "[parameters('subnet')]"
+        },
+        "customNetworkInterfaceName": "[parameters('customNetworkInterfaceName')]",
+        "privateLinkServiceConnections": [
+          {
+            "name": "[parameters('privateEndpointName')]",
+            "properties": {
+              "privateLinkServiceId": "[resourceId('Microsoft.Sql/servers', parameters('serverName'))]",
+              "groupIds": "[parameters('targetSubResource')]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Insights/diagnosticSettings",
+      "apiVersion": "2021-05-01-preview",
+      "scope": "[format('Microsoft.Sql/servers/{0}/databases/{1}', parameters('serverName'), 'master')]",
+      "name": "[concat(parameters('serverName'), '-diagnostic')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Sql/servers', parameters('serverName'))]"
+      ],
+      "properties": {
+        "workspaceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsWorkspaceName'))]",
+        "logs": [
+          {
+            "category": "SQLSecurityAuditEvents",
+            "enabled": true,
+            "retentionPolicy": {
+              "days": 0,
+              "enabled": false
+            }
+          },
+          {
+            "category": "DevOpsOperationsAudit",
+            "enabled": true,
+            "retentionPolicy": {
+              "days": 0,
+              "enabled": false
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {
+    "serverName": {
+      "type": "string",
+      "value": "[parameters('serverName')]"
+    },
+    "serverResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Sql/servers', parameters('serverName'))]"
+    },
+    "serverFQDN": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Sql/servers', parameters('serverName'))).fullyQualifiedDomainName]"
+    },
+    "systemAssignedIdentityPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Sql/servers', parameters('serverName')), '2021-11-01', 'Full').identity.principalId]"
+    }
+  }
+}
