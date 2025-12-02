@@ -1,0 +1,119 @@
+// ============================================
+// FIXED FUNCTION APP MODULES
+// Add these after your managedIdentities module (around line 486)
+// Uses correct output format from your userManagedIdentity module
+// ============================================
+
+// // Variables to find index of umi
+var cdbBridgeEtlFunctionTargetUmiIndex = indexOf(map(identities, id => id.name), cdbBridgeEtlFunctionUmiName)
+var caseworkerBridgeEtlFunctionTargetUmiIndex = indexOf(map(identities, id => id.name), caseworkerBridgeEtlFunctionUmiName)
+var dequeueServiceFunctionTargetUmiIndex = indexOf(map(identities, id => id.name), dequeueServiceFunctionUmiName)
+var queueManagerServiceFunctionTargetUmiIndex = indexOf(map(identities, id => id.name), queueManagerServiceFunctionUmiName)
+
+// Function App 1: CDB to Bridge ETL
+module cdbToBridgeFunction '../../modules/Compute/functionApp.bicep' = {
+  name: 'deploy-cdb-bridge-function'
+  params: {
+    location: location
+    functionAppName: 'vos-iaz-func-${environment}-bridge-cdb-bridge-etl'
+    functionAppDotnetFrameworkVersion: dotnetVersion
+    functionAppVirtualNetworkResourceGroupName: vnetResourceGroupName
+    functionAppVirtualNetworkName: vnetName
+    functionAppSubnetName: integrationSubnetName
+    functionAppPrivateEndpointSubnetName: privateEndpointSubnetName
+    functionAppUserAssignedManagedIdentityClientId: managedIdentities.outputs.clientIds[cdbBridgeEtlFunctionTargetUmiIndex]
+    functionAppUserAssignedIdentityId: managedIdentities.outputs.identityResourceIds[cdbBridgeEtlFunctionTargetUmiIndex]
+    functionAppPlanId: appServicePlanId
+    functionAppMinimumElasticInstanceCount: minimumElasticInstanceCount
+    applicationInsightsConnectionString: appInsights.outputs.connectionString
+    tags: union(tags, {
+      Purpose: 'CDB to Bridge ETL'
+      FunctionType: 'DataTransport'
+    })
+  }
+  dependsOn: [
+    appInsights
+    managedIdentities
+  ]
+}
+
+// Function App 2: Caseworker to Bridge ETL
+module caseworkerToBridgeFunction '../../modules/Compute/functionApp.bicep' = {
+  name: 'deploy-caseworker-bridge-function'
+  params: {
+    location: location
+    functionAppName: 'vos-iaz-func-${environment}-bridge-caseworker-bridge-etl'
+    functionAppDotnetFrameworkVersion: dotnetVersion
+    functionAppVirtualNetworkResourceGroupName: vnetResourceGroupName
+    functionAppVirtualNetworkName: vnetName
+    functionAppSubnetName: integrationSubnetName
+    functionAppPrivateEndpointSubnetName: privateEndpointSubnetName
+    functionAppUserAssignedManagedIdentityClientId: managedIdentities.outputs.clientIds[caseworkerBridgeEtlFunctionTargetUmiIndex]
+    functionAppUserAssignedIdentityId: managedIdentities.outputs.identityResourceIds[caseworkerBridgeEtlFunctionTargetUmiIndex]
+    functionAppPlanId: appServicePlanId
+    functionAppMinimumElasticInstanceCount: minimumElasticInstanceCount
+    applicationInsightsConnectionString: appInsights.outputs.connectionString
+    tags: union(tags, {
+      Purpose: 'Caseworker to Bridge ETL'
+      FunctionType: 'DataTransport'
+    })
+  }
+  dependsOn: [
+    appInsights
+    managedIdentities
+  ]
+}
+
+// Function App 3: Dequeue Service
+module dequeueServiceFunction '../../modules/Compute/functionApp.bicep' = {
+  name: 'deploy-dequeue-service-function'
+  params: {
+    location: location
+    functionAppName: 'vos-iaz-func-${environment}-bridge-dequeue-service'
+    functionAppDotnetFrameworkVersion: dotnetVersion
+    functionAppVirtualNetworkResourceGroupName: vnetResourceGroupName
+    functionAppVirtualNetworkName: vnetName
+    functionAppSubnetName: integrationSubnetName
+    functionAppPrivateEndpointSubnetName: privateEndpointSubnetName
+    functionAppUserAssignedManagedIdentityClientId: managedIdentities.outputs.clientIds[dequeueServiceFunctionTargetUmiIndex]
+    functionAppUserAssignedIdentityId: managedIdentities.outputs.identityResourceIds[dequeueServiceFunctionTargetUmiIndex]
+    functionAppPlanId: appServicePlanId
+    functionAppMinimumElasticInstanceCount: minimumElasticInstanceCount
+    applicationInsightsConnectionString: appInsights.outputs.connectionString
+    tags: union(tags, {
+      Purpose: 'Dequeue Service'
+      FunctionType: 'DataPersistence'
+    })
+  }
+  dependsOn: [
+    appInsights
+    managedIdentities
+  ]
+}
+
+// Function App 4: Queue Manager Service
+module queueManagerFunction '../../modules/Compute/functionApp.bicep' = {
+  name: 'deploy-queue-manager-function'
+  params: {
+    location: location
+    functionAppName: 'vos-iaz-func-${environment}-bridge-queue-manager-service'
+    functionAppDotnetFrameworkVersion: dotnetVersion
+    functionAppVirtualNetworkResourceGroupName: vnetResourceGroupName
+    functionAppVirtualNetworkName: vnetName
+    functionAppSubnetName: integrationSubnetName
+    functionAppPrivateEndpointSubnetName: privateEndpointSubnetName
+    functionAppUserAssignedManagedIdentityClientId: managedIdentities.outputs.clientIds[queueManagerServiceFunctionTargetUmiIndex]
+    functionAppUserAssignedIdentityId: managedIdentities.outputs.identityResourceIds[queueManagerServiceFunctionTargetUmiIndex]
+    functionAppPlanId: appServicePlanId
+    functionAppMinimumElasticInstanceCount: minimumElasticInstanceCount
+    applicationInsightsConnectionString: appInsights.outputs.connectionString
+    tags: union(tags, {
+      Purpose: 'Queue Manager Service'
+      FunctionType: 'QueueManagement'
+    })
+  }
+  dependsOn: [
+    appInsights
+    managedIdentities
+  ]
+}
