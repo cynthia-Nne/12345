@@ -1,0 +1,48 @@
+fixing of function app code to point to a storage account
+
+1️⃣ Add outputs to storageAccount.bicep
+
+Scroll to the very end of the file (after the blobPrivateEndpoint resource that you showed) and add this outside any resource block:
+
+// -----------------------------------------------------------------------------
+// Outputs – used by other modules (e.g. Function App)
+// -----------------------------------------------------------------------------
+
+// Storage account name
+output storageAccountName string = storage.name
+
+// Connection string for AzureWebJobsStorage, marked as secure
+@secure()
+output storageAccountConnectionString string = 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${listKeys(storage.id, ''2022-09-01'').keys[0].value};EndpointSuffix=${environment().suffixes.storage}'
+
+
+2️⃣ Quick reminder what happens next (you may already have started this)
+
+In functionApp.bicep add parameters:
+
+@secure()
+param storageAccountConnectionString string
+param storageAccountName string
+
+…and in siteConfig.appSettings add:
+
+{
+  name: 'AzureWebJobsStorage'
+  value: storageAccountConnectionString
+}
+{
+  name: 'STORAGE_ACCOUNT_NAME'
+  value: storageAccountName
+}
+
+In main.bicep, where you call the Function App module, pass the outputs:
+
+module cdbToBridgeFunction '../../../../../bicep-modules/Bicep/modules/Compute/functionApp.bicep' = {
+  name: 'deploy-cdb-bridge-function'
+  params: {
+    ...
+    storageAccountConnectionString: storageAccount.outputs.storageAccountConnectionString
+    storageAccountName: storageAccount.outputs.storageAccountName
+    ...
+  }
+}
