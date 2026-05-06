@@ -1,0 +1,342 @@
+// ============================================================
+// IR Monitoring - Complete Bicep Deployment
+// Deploys: Workbook + Alert Rule + Action Group
+// Environment: PRD (Production)
+// ============================================================
+
+// ── PARAMETERS ──────────────────────────────────────────────
+// These are the inputs you can change when deploying
+
+@description('Azure region to deploy everything into')
+param location string = 'uksouth'
+
+@description('Your Log Analytics Workspace name')
+param logAnalyticsWorkspaceName string = 'logmane'
+
+@description('Resource group where Log Analytics workspace lives')
+param logAnalyticsResourceGroup string = 'rgnameE'
+
+@description('Your subscription ID')
+param subscriptionId string = subscription().subscriptionId
+
+@description('The two IR app names to monitor')
+param appNames array = [
+  'appservername1'
+  'appservername2'
+]
+
+@description('Email addresses to send alerts to - add as many as needed')
+param alertEmailAddresses array = [
+  {
+    name: 'TeamMember1'
+    emailAddress: 'member1@yourcompany.com'  // CHANGE THIS
+  }
+  {
+    name: 'TeamMember2'
+    emailAddress: 'member2@yourcompany.com'  // CHANGE THIS
+  }
+  {
+    name: 'TeamMember3'
+    emailAddress: 'member3@yourcompany.com'  // CHANGE THIS
+  }
+]
+
+@description('How many failures in 5 minutes before alert fires')
+param failureThreshold int = 50
+
+// ── VARIABLES ────────────────────────────────────────────────
+// These are computed values used throughout the script
+
+var workbookName = 'IR-app-monitoring'
+var workbookDisplayName = 'IR Application Monitoring'
+var actionGroupName = 'Platform'
+var actionGroupShortName = 'Alert'
+var alertRuleName = 'IR-failed-request'
+
+// Build the app name filter string for KQL queries
+// This creates: "app1", "app2" format for the 'in' operator
+var appNamesKql = '"${join(appNames, '", "')}"'
+
+// Full resource ID of the Log Analytics workspace
+var logAnalyticsWorkspaceId = '/subscriptions/${subscriptionId}/resourceGroups/${logAnalyticsResourceGroup}/providers/Microsoft.OperationalInsights/workspaces/${logAnalyticsWorkspaceName}'
+
+// ── WORKBOOK ─────────────────────────────────────────────────
+// This is your dashboard - all 5 queries in one workbook
+
+resource workbook 'Microsoft.Insights/workbooks@2022-04-01' = {
+  name: guid(workbookName)  // Creates a unique ID based on the name
+  location: location
+  kind: 'shared'
+  properties: {
+    displayName: workbookDisplayName
+    description: 'This workbook shows request volume, failures, latency, exceptions and dependency health for the IR application.'
+    serializedData: string(loadJsonContent('workbook-template.json'))  // See note below
+    version: '1.0'
+    category: 'workbook'
+    sourceId: logAnalyticsWorkspaceId
+  }
+  tags: {
+    environment: 'production'
+    application: 'IR'
+    purpose: 'monitoring'
+  }
+}
+
+// Note: Because workbook JSON is very long, we define it inline below
+// as a separate variable to keep things readable
+
+var workbookSerializedData = '''
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "content": {
+        "json": "# IR Application Monitoring \nThis workbook shows request volume, failures, latency, exceptions and dependency health for the IR application."
+      },
+      "name": "title"
+    },
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "timeRange",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "type": 4,
+            "isRequired": true,
+            "value": {
+              "durationMs": 86400000
+            },
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 3600000 },
+                { "durationMs": 14400000 },
+                { "durationMs": 43200000 },
+                { "durationMs": 86400000 },
+                { "durationMs": 172800000 },
+                { "durationMs": 604800000 }
+              ],
+              "allowCustom": true
+            },
+            "label": "Time Range"
+          }
+        ],
+        "style": "pills",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces"
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests\n| where TimeGenerated {TimeRange}\n| where AppRoleName in (APPNAMES)\n| summarize Requests = sum(ItemCount) by AppRoleName\n| order by Requests desc",
+        "size": 1,
+        "title": "Query 6 - Request Volume by App",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table",
+        "gridSettings": {
+          "sortBy": [{ "itemKey": "Requests", "sortOrder": 2 }]
+        }
+      },
+      "name": "query6-request-volume"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests\n| where TimeGenerated {TimeRange}\n| where AppRoleName in (APPNAMES)\n| summarize\n    TotalRequests = sum(ItemCount),\n    FailedRequests = sumif(ItemCount, Success == false),\n    FailureRatePct = round(100.0 * sumif(ItemCount, Success == false) / max_of(sum(ItemCount), 1), 2),\n    P95DurationMs = round(percentile(DurationMs, 95), 0)",
+        "size": 1,
+        "title": "Query 2 - Health Summary (Total, Failed, Rate, P95)",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table"
+      },
+      "name": "query2-health-summary"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests\n| where TimeGenerated {TimeRange}\n| where AppRoleName in (APPNAMES)\n| summarize\n    Requests = sum(ItemCount),\n    FailedRequests = sumif(ItemCount, Success == false)\n    by bin(TimeGenerated, 5m)\n| render timechart",
+        "size": 0,
+        "title": "Query 3 - Requests vs Failures Over Time",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "name": "query3-timeline"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests\n| where TimeGenerated {TimeRange}\n| where AppRoleName in (APPNAMES)\n| where Success == false\n| summarize FailedCount = sum(ItemCount) by Name, ResultCode\n| top 10 by FailedCount desc",
+        "size": 1,
+        "title": "Query 4 - Top 10 Failed Endpoints",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart"
+      },
+      "name": "query4-top-failures"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppDependencies\n| where TimeGenerated {TimeRange}\n| where AppRoleName in (APPNAMES)\n| summarize\n    FailedDependencies = sumif(ItemCount, Success == false),\n    P95DurationMs = percentile(DurationMs, 95)\n    by DependencyType, Target\n| top 10 by FailedDependencies desc",
+        "size": 1,
+        "title": "Query 5 - Dependency Health (Database etc)",
+        "timeContext": { "durationMs": 0 },
+        "timeContextFromParameter": "TimeRange",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "table"
+      },
+      "name": "query5-dependencies"
+    }
+  ],
+  "styleSettings": {},
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}
+'''
+
+// ── ACTION GROUP ─────────────────────────────────────────────
+// This is your email contact list - who gets notified
+
+resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
+  name: actionGroupName
+  location: 'global'  // Action groups must be global
+  properties: {
+    groupShortName: actionGroupShortName  // Max 12 chars - shown in emails
+    enabled: true
+
+    // Email receivers - one entry per person
+    emailReceivers: [for (email, i) in alertEmailAddresses: {
+      name: email.name
+      emailAddress: email.emailAddress
+      useCommonAlertSchema: true  // Standardised email format - easier to read
+    }]
+
+    // You can add more receiver types here if needed in future:
+    // smsReceivers: []       // Text messages
+    // webhookReceivers: []   // Teams/Slack integration
+    // voiceReceivers: []     // Phone calls
+    // logicAppReceivers: []  // Automated workflows
+  }
+  tags: {
+    environment: 'production'
+    application: 'IR'
+    purpose: 'alerting'
+  }
+}
+
+// ── ALERT RULE ───────────────────────────────────────────────
+// This is the actual alert - the condition that triggers emails
+
+resource alertRule 'Microsoft.Insights/scheduledQueryRules@2023-03-15-preview' = {
+  name: alertRuleName
+  location: location
+  properties: {
+    displayName: alertRuleName
+    description: 'Triggers when failed IR application requests exceed ${failureThreshold} failures in 5 minutes'
+    enabled: true
+    severity: 2  // 0=Critical, 1=Error, 2=Warning, 3=Informational, 4=Verbose
+
+    // How often to run the query and check
+    evaluationFrequency: 'PT5M'   // PT5M = every 5 minutes
+    windowSize: 'PT5M'            // PT5M = look at last 5 minutes of data
+
+    // Where to run the query
+    scopes: [
+      logAnalyticsWorkspaceId
+    ]
+
+    // The KQL query that detects failures
+    criteria: {
+      allOf: [
+        {
+          // This is the query that runs every 5 minutes
+          query: '''
+            AppRequests
+            | where TimeGenerated > ago(5m)
+            | where AppRoleName in (${appNamesKql})
+            | where Success == false
+            | summarize FailedCount = sum(ItemCount)
+          '''
+
+          // How to measure the query results
+          metricMeasureColumn: null   // null = count table rows
+          resourceIdColumn: null
+          operator: 'GreaterThan'     // Fire when count IS GREATER THAN threshold
+          threshold: failureThreshold // Default: 50 failures
+          timeAggregation: 'Count'    // Count the rows returned
+
+          // How many consecutive violations before firing
+          // 1 = fire immediately when threshold exceeded
+          // 3 = only fire if threshold exceeded 3 times in a row (reduces false alarms)
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+
+    // Connect to action group (send emails)
+    actions: {
+      actionGroups: [
+        actionGroup.id  // Reference to the action group we created above
+      ]
+      customProperties: {
+        'Email.Subject': 'IR-Failed-Request-'  // Email subject line
+      }
+    }
+
+    // Alert behaviour settings
+    autoMitigate: true   // Auto-resolve when condition clears (failures drop below 50)
+    checkWorkspaceAlertsStorageConfigured: false
+  }
+  tags: {
+    environment: ''
+    application: 'IR'
+    purpose: 'alerting'
+  }
+
+  // Make sure action group exists before creating alert
+  dependsOn: [
+    actionGroup
+  ]
+}
+
+// ── OUTPUTS ──────────────────────────────────────────────────
+// These print useful info after deployment
+
+output workbookId string = workbook.id
+output workbookName string = workbook.properties.displayName
+output actionGroupId string = actionGroup.id
+output actionGroupName string = actionGroup.name
+output alertRuleId string = alertRule.id
+output alertRuleName string = alertRule.name
+output deploymentSummary object = {
+  workbook: workbook.properties.displayName
+  actionGroup: actionGroup.name
+  alertRule: alertRule.name
+  emailCount: length(alertEmailAddresses)
+  failureThreshold: failureThreshold
+  evaluationFrequency: '5 minutes'
+  location: location
+}
