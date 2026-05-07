@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+
+    "environment": { "value": "dev" },
+    "location": { "value": "south" },
+
+    "logAnalyticsWorkspaceName": {
+      "value": "law-getsink"
+    },
+
+    "logAnalyticsResourceGroup": {
+      "value": "nkgetsink"
+    },
+
+    "appNames": {
+      "value": [
+        "getsink-catalogmanager",
+        "getsink-catalog"
+      ]
+    },
+
+    "alertEmailAddresses": {
+      "value": [
+        { "name": "Developer1", "emailAddress": "dev1@yourcompany.com" }
+      ]
+    },
+
+    "failureThreshold": { "value": 1 },
+    "evaluationFrequency": { "value": "PT1H" },
+    "windowSize": { "value": "PT1H" },
+    "alertSeverity": { "value": 3 },
+    "autoMitigate": { "value": true }
+  }
+}
