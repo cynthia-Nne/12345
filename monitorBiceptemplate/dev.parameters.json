@@ -10,6 +10,16 @@
       "value": "law-getsink"
     },
 
+    "keyVaults": {
+      "value": [
+        { "name": "your-kv-1-name", "resourceGroup": "rg-actual-1" },
+        { "name": "your-kv-2-name",          "resourceGroup": "rg-actual-2" },
+        { "name": "your-kv-3-name",          "resourceGroup": "rg-actual-3" }
+      ]
+    },
+
+    "daysBeforeExpiry": { "value": 30 },
+
     "logAnalyticsResourceGroup": {
       "value": "nkgetsink"
     },
@@ -32,5 +42,9 @@
     "windowSize": { "value": "PT1H" },
     "alertSeverity": { "value": 3 },
     "autoMitigate": { "value": true }
-  }
+    
+    
+  } 
+  
+  
 }
