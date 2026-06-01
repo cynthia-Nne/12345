@@ -12,9 +12,9 @@
 
     "keyVaults": {
       "value": [
-        { "name": "your-kv-1-name", "resourceGroup": "rg-actual-1" },
-        { "name": "your-kv-2-name",          "resourceGroup": "rg-actual-2" },
-        { "name": "your-kv-3-name",          "resourceGroup": "rg-actual-3" }
+        { "name": "your-kv-1-name", "resourceGroup": "rg-actual-1", "logAnalyticsWorkspaceName": "law-getsink",          "logAnalyticsResourceGroup": "nkgetsink"    },
+        { "name": "your-kv-2-name", "resourceGroup": "rg-actual-2", "logAnalyticsWorkspaceName": "law-your-workspace-2", "logAnalyticsResourceGroup": "rg-your-law-2" },
+        { "name": "your-kv-3-name", "resourceGroup": "rg-actual-3", "logAnalyticsWorkspaceName": "law-your-workspace-3", "logAnalyticsResourceGroup": "rg-your-law-3" }
       ]
     },
 

@@ -52,11 +52,11 @@ param alertSeverity int = 2
 @description('Auto resolve alert')
 param autoMitigate bool = true
 
-@description('Key Vault names and their resource groups to monitor')
+@description('Key Vault names, resource groups, and their Log Analytics workspaces to monitor')
 param keyVaults array = [
-  { name: 'vos-iaz-kvt-prd-inrule', resourceGroup: 'rg-one' }
-  { name: 'kv-name-2', resourceGroup: 'rg-two' }
-  { name: 'kv-name-3', resourceGroup: 'rg-three' }
+  { name: 'kv-name-1', resourceGroup: 'rg-one', logAnalyticsWorkspaceName: 'law-one', logAnalyticsResourceGroup: 'rg-law-one' }
+  { name: 'kv-name-2',              resourceGroup: 'rg-two', logAnalyticsWorkspaceName: 'law-two', logAnalyticsResourceGroup: 'rg-law-two' }
+  { name: 'kv-name-3',              resourceGroup: 'rg-three', logAnalyticsWorkspaceName: 'law-three', logAnalyticsResourceGroup: 'rg-law-three' }
 ]
 
 @description('Days before expiry to alert')
@@ -88,8 +88,6 @@ var logAnalyticsWorkspaceId = resourceId(
 // Build KQL app name filter from the array
 // Turns ['app1','app2'] into "app1", "app2"
 var appNamesKql = join(map(appNames, name => '"${name}"'), ', ')
-
-var kvExpiryQuery = 'AzureDiagnostics\n| where ResourceType == "VAULTS"\n| where ResourceId has_any (${join(map(keyVaults, kv => '"${kv.name}"'), ', ')})\n| where isnotempty(properties_attributes_exp_t)\n| extend ExpiryDate = todatetime(properties_attributes_exp_t)\n| where ExpiryDate between (now() .. now() + ${daysBeforeExpiry}d)\n| summarize FailedCount = count() by bin(TimeGenerated, 1h)'
 
 // ============================================================
 // ── WORKBOOK QUERIES ─────────────────────────────────────────
@@ -339,18 +337,18 @@ module alertRuleFailures 'alert-rule.bicep' = {
 //   dependsOn: [ actionGroup ]
 // }
 
-// -- MODULE 4: ALERT RULE (Key Vault Key Expiry) ----
-module kvExpiryAlert 'alert-rule.bicep' = {
-  name: 'deploy-alert-kv-expiry-${environment}'
+// -- MODULE 4: ALERT RULES (Key Vault Key Expiry — one per vault/workspace) ----
+module kvExpiryAlerts 'alert-rule.bicep' = [for kv in keyVaults: {
+  name: 'deploy-alert-kv-expiry-${kv.name}-${environment}'
   params: {
     location: location
-    alertRuleName: 'alrt-keyvault-expiring-keys-${environment}'
-    alertDescription: 'Triggers when Key Vault keys are expiring within ${daysBeforeExpiry} days'
-    logAnalyticsWorkspaceId: logAnalyticsWorkspaceId
-    alertQuery: kvExpiryQuery
+    alertRuleName: 'alrt-keyvault-expiring-keys-${kv.name}-${environment}'
+    alertDescription: 'Triggers when Key Vault ${kv.name} has keys expiring within ${daysBeforeExpiry} days'
+    logAnalyticsWorkspaceId: resourceId(kv.logAnalyticsResourceGroup, 'Microsoft.OperationalInsights/workspaces', kv.logAnalyticsWorkspaceName)
+    alertQuery: 'AzureDiagnostics\n| where ResourceType == "VAULTS"\n| where ResourceId has "${kv.name}"\n| where isnotempty(properties_attributes_exp_t)\n| extend ExpiryDate = todatetime(properties_attributes_exp_t)\n| where ExpiryDate between (now() .. now() + ${daysBeforeExpiry}d)\n| summarize FailedCount = count() by bin(TimeGenerated, 1h)'
     metricMeasureColumn: 'FailedCount'
     actionGroupId: actionGroup.outputs.actionGroupId
-    emailSubject: 'Key Vault Key Expiry Alert - ${env}'
+    emailSubject: 'Key Vault Key Expiry Alert - ${kv.name} - ${env}'
     severity: alertSeverity
     operator: 'GreaterThan'
     failureThreshold: 0
@@ -360,7 +358,7 @@ module kvExpiryAlert 'alert-rule.bicep' = {
     tags: tags
   }
   dependsOn: [ actionGroup ]
-}
+}]
 
 // ── OUTPUTS ──────────────────────────────────────────────────
 
@@ -376,4 +374,4 @@ output deploymentSummary object = {
   appCount: length(appNames)
 }
 
-output kvExpiryAlertId string = kvExpiryAlert.outputs.alertRuleId
+output kvExpiryAlertIds array = [for i in range(0, length(keyVaults)): kvExpiryAlerts[i].outputs.alertRuleId]
