@@ -154,3 +154,32 @@ stages:
             --location "$(azureLocation)" \
             --template-file "$(templateFile)" \
             --parameters "$(parametersFile)"
+
+            targetScope = 'resourceGroup'
+
+@description('Resource ID of the policy definition to assign.')
+param policyDefinitionId string
+
+@description('Name of the resource group, used in the assignment display name.')
+param rgName string
+
+resource rgAssignment 'Microsoft.Authorization/policyAssignments@2021-06-01' = {
+  name: 'mandatory-tags-${rgName}'
+  properties: {
+    displayName: 'Mandatory tagging enforcement (${rgName})'
+    description: 'Enforces tags on specific resource group: ${rgName}'
+    policyDefinitionId: policyDefinitionId
+  }
+}
+
+
+// 3. Scenario B: assign to SPECIFIC resource groups (via module, since these
+//    deploy at a different scope than this subscription-level file)
+module rgAssignments 'rgPolicyAssignment.bicep' = [for rgName in targetRGs: if (!assignToAllResourceGroups) {
+  name: 'assign-${rgName}'
+  scope: resourceGroup(rgName)
+  params: {
+    policyDefinitionId: taggingPolicy.id
+    rgName: rgName
+  }
+}]
