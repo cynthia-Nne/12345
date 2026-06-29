@@ -1,0 +1,156 @@
+targetScope = 'subscription'
+
+@description('Determines if the policy should apply to ALL resource groups inside the subscription.')
+param assignToAllResourceGroups bool = false
+
+@description('An array of target resource group names. Only used if assignToAllResourceGroups is false.')
+param targetRGs array = []
+
+@description('Tag names that must exist on every resource group.')
+param requiredTags array = [
+  'Environment'
+  'ID'
+  'Name'
+  'BusinessDep'
+  'SubscriptionName'
+]
+
+// 1. Policy Definition (created once at subscription scope)
+resource taggingPolicy 'Microsoft.Authorization/policyDefinitions@2021-06-01' = {
+  name: 'enforce-mandatory-tags-rg'
+  properties: {
+    displayName: 'Enforce mandatory tags on Resource Groups'
+    description: 'Deny creation or update of resource groups missing required tags.'
+    mode: 'All'
+    metadata: {
+      category: 'Tags'
+    }
+    policyRule: {
+      if: {
+        allOf: [
+          {
+            field: 'type'
+            equals: 'Microsoft.Resources/subscriptions/resourceGroups'
+          }
+          {
+            anyOf: [for tag in requiredTags: {
+              field: 'tags[${tag}]'
+              exists: 'false'
+            }]
+          }
+        ]
+      }
+      then: {
+        effect: 'deny'
+      }
+    }
+  }
+}
+
+// 2. Scenario A: assign to ALL resource groups (subscription-wide)
+resource subscriptionAssignment 'Microsoft.Authorization/policyAssignments@2021-06-01' = if (assignToAllResourceGroups) {
+  name: 'mandatory-tags-sub-wide'
+  properties: {
+    displayName: 'Mandatory tagging enforcement (Subscription-Wide)'
+    description: 'Enforces tags across all resource groups in this subscription.'
+    policyDefinitionId: taggingPolicy.id
+  }
+}
+
+// 3. Scenario B: assign to SPECIFIC resource groups
+resource rgAssignment 'Microsoft.Authorization/policyAssignments@2021-06-01' = [for rgName in targetRGs: if (!assignToAllResourceGroups) {
+  name: 'mandatory-tags-${rgName}'
+  scope: resourceGroup(rgName)
+  properties: {
+    displayName: 'Mandatory tagging enforcement (${rgName})'
+    description: 'Enforces tags on specific resource group: ${rgName}'
+    policyDefinitionId: taggingPolicy.id
+  }
+}]
+
+
+
+using 'main.bicep'
+
+param assignToAllResourceGroups = false
+param targetRGs = [
+  'rg-finance-prod'
+  'rg-marketing-dev'
+  'rg-hr-shared'
+]
+param requiredTags = [
+  'Environment'
+  'ID'
+  'Name'
+  'BusinessDep'
+  'SubscriptionName'
+]
+
+
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - 'Cloud Platform/Infrastructure/Policy/Bicep/**'
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  # Service Principal needs Owner, or Contributor + User Access Administrator, at subscription scope
+  azureServiceConnection: 'MyAzureServiceConnection'
+  azureLocation: 'uksouth'
+  bicepFolder: 'Cloud Platform/Infrastructure/Policy/Bicep'
+  templateFile: '$(Build.SourcesDirectory)/$(bicepFolder)/main.bicep'
+  parametersFile: '$(Build.SourcesDirectory)/$(bicepFolder)/rgParameters.bicepparam'
+
+stages:
+- stage: Validate
+  displayName: 'Build & Validate Bicep'
+  jobs:
+  - job: BicepValidate
+    displayName: 'Lint, compile and what-if'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Bicep build (lint)'
+      inputs:
+        azureSubscription: '$(azureServiceConnection)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az bicep build --file "$(templateFile)"
+
+    - task: AzureCLI@2
+      displayName: 'What-if preview'
+      inputs:
+        azureSubscription: '$(azureServiceConnection)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az deployment sub what-if \
+            --location "$(azureLocation)" \
+            --template-file "$(templateFile)" \
+            --parameters "$(parametersFile)"
+
+- stage: DeployPolicy
+  displayName: 'Deploy Tagging Policy'
+  dependsOn: Validate
+  jobs:
+  - job: DeployBicep
+    displayName: 'Run Subscription Deployment'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Deploy at subscription scope'
+      inputs:
+        azureSubscription: '$(azureServiceConnection)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az deployment sub create \
+            --name "tagging-policy-$(Build.BuildId)" \
+            --location "$(azureLocation)" \
+            --template-file "$(templateFile)" \
+            --parameters "$(parametersFile)"
