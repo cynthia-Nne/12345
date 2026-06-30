@@ -1,0 +1,80 @@
+// subscriptionPolicyAssignment.bicep
+targetScope = 'subscription'
+
+@description('Name of the policy assignment')
+param assignmentName string
+
+@description('Resource ID of the policy definition (or initiative) to assign')
+param policyDefinitionId string
+
+@description('Display name shown in the portal')
+param displayName string = assignmentName
+
+@description('Parameters passed to the policy definition')
+param policyParameters object = {}
+
+@description('Identity type. Use SystemAssigned for Modify / DeployIfNotExists policies, None for audit-only')
+@allowed([ 'SystemAssigned', 'None' ])
+param identityType string = 'None'
+
+@description('Location for the assignment identity. Required when identityType is SystemAssigned')
+param location string = ''
+
+resource assignment 'Microsoft.Authorization/policyAssignments@2024-04-01' = {
+  name: assignmentName
+  location: identityType == 'SystemAssigned' ? location : null
+  identity: identityType == 'SystemAssigned' ? { type: 'SystemAssigned' } : { type: 'None' }
+  properties: {
+    displayName: displayName
+    policyDefinitionId: policyDefinitionId
+    parameters: policyParameters
+  }
+}
+
+output assignmentId string = assignment.id
+output principalId string = identityType == 'SystemAssigned' ? assignment.identity.principalId : ''
+
+
+
+
+
+
+// rgPolicyAssignment.bicep
+targetScope = 'resourceGroup'
+
+@description('Name of the policy assignment')
+param assignmentName string
+
+@description('Resource ID of the policy definition (or initiative) to assign')
+param policyDefinitionId string
+
+@description('Display name shown in the portal')
+param displayName string = assignmentName
+
+@description('Parameters passed to the policy definition')
+param policyParameters object = {}
+
+@description('Identity type. Use SystemAssigned for Modify / DeployIfNotExists policies, None for audit-only')
+@allowed([ 'SystemAssigned', 'None' ])
+param identityType string = 'None'
+
+@description('Location for the assignment identity. Required when identityType is SystemAssigned. Defaults to the RG location')
+param location string = resourceGroup().location
+
+resource assignment 'Microsoft.Authorization/policyAssignments@2024-04-01' = {
+  name: assignmentName
+  location: identityType == 'SystemAssigned' ? location : null
+  identity: identityType == 'SystemAssigned' ? { type: 'SystemAssigned' } : { type: 'None' }
+  properties: {
+    displayName: displayName
+    policyDefinitionId: policyDefinitionId
+    parameters: policyParameters
+  }
+}
+
+output assignmentId string = assignment.id
+output principalId string = identityType == 'SystemAssigned' ? assignment.identity.principalId : ''
+
+
+
+
