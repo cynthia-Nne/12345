@@ -183,3 +183,104 @@ module rgAssignments 'rgPolicyAssignment.bicep' = [for rgName in targetRGs: if (
     rgName: rgName
   }
 }]
+
+
+targetScope = 'subscription'
+
+@description('Tag names that must exist on every resource group.')
+param requiredTags array
+
+resource taggingPolicy 'Microsoft.Authorization/policyDefinitions@2021-06-01' = {
+  name: 'enforce-mandatory-tags-rg'
+  properties: {
+    displayName: 'Enforce mandatory tags on Resource Groups'
+    description: 'Deny creation or update of resource groups missing required tags.'
+    mode: 'All'
+    metadata: {
+      category: 'Tags'
+    }
+    policyRule: {
+      if: {
+        allOf: [
+          {
+            field: 'type'
+            equals: 'Microsoft.Resources/subscriptions/resourceGroups'
+          }
+          {
+            anyOf: [for tag in requiredTags: {
+              field: 'tags[${tag}]'
+              exists: 'false'
+            }]
+          }
+        ]
+      }
+      then: {
+        effect: 'deny'
+      }
+    }
+  }
+}
+
+@description('Resource ID of the created policy definition, consumed by the assignment modules.')
+output policyDefinitionId string = taggingPolicy.id
+
+
+
+
+targetScope = 'subscription'
+
+@description('Resource ID of the policy definition to assign.')
+param policyDefinitionId string
+
+resource subscriptionAssignment 'Microsoft.Authorization/policyAssignments@2021-06-01' = {
+  name: 'mandatory-tags-sub-wide'
+  properties: {
+    displayName: 'Mandatory tagging enforcement (Subscription-Wide)'
+    description: 'Enforces tags across all resource groups in this subscription.'
+    policyDefinitionId: policyDefinitionId
+  }
+}
+
+
+targetScope = 'subscription'
+
+@description('Determines if the policy should apply to ALL resource groups inside the subscription.')
+param assignToAllResourceGroups bool = false
+
+@description('An array of target resource group names. Only used if assignToAllResourceGroups is false.')
+param targetRGs array = []
+
+@description('Tag names that must exist on every resource group.')
+param requiredTags array = [
+  'Environment'
+  'ID'
+  'Name'
+  'BusinessDep'
+  'SubscriptionName'
+]
+
+// ─── MODULE 1: POLICY DEFINITION ───────────────────────────────
+module policyDefinition '../../../bicep-modules/Bicep/modules/Policy/policyDefinition.bicep' = {
+  name: 'deploy-tagging-policy-definition'
+  params: {
+    requiredTags: requiredTags
+  }
+}
+
+// ─── MODULE 2: SUBSCRIPTION-WIDE ASSIGNMENT (Scenario A) ────────
+module subscriptionAssignment '../../../bicep-modules/Bicep/modules/Policy/subscriptionAssignment.bicep' = if (assignToAllResourceGroups) {
+  name: 'deploy-sub-wide-assignment'
+  params: {
+    policyDefinitionId: policyDefinition.outputs.policyDefinitionId
+  }
+}
+
+// ─── MODULE 3: PER-RESOURCE-GROUP ASSIGNMENT (Scenario B) ───────
+module rgAssignments '../../../bicep-modules/Bicep/modules/Policy/rgAssignment.bicep' = [for rgName in targetRGs: if (!assignToAllResourceGroups) {
+  name: 'assign-${rgName}'
+  scope: resourceGroup(rgName)
+  params: {
+    policyDefinitionId: policyDefinition.outputs.policyDefinitionId
+    rgName: rgName
+  }
+}]
