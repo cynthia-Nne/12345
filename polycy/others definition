@@ -1,0 +1,215 @@
+// policyDefinition-denyExpensiveAppServicePlanSkus.bicep
+// Policy Definition: Restrict App Service Plan SKU to WS1, EP1, and PremiumV2.
+// Applies to ALL Microsoft.Web/serverfarms — Function Apps, Web Apps, and
+// Logic App Standard all share the same underlying serverfarm resource type,
+// so this single policy governs all three workload types.
+// Deploy once (subscription/MG scope), then wire to rgPolicyAssignment.bicep /
+// subscriptionPolicyAssignment.bicep same as the APIM / Event Hub policies.
+
+targetScope = 'subscription'
+
+@description('List of allowed App Service Plan SKU names. Only sizes in this list are permitted for any App Service Plan (Function App, Web App, or Logic App Standard).')
+param allowedAppServicePlanSizes array = [
+  'WS1'
+  'EP1'
+  'P1V2'
+  'P2V2'
+  'P3V2'
+]
+
+@description('Name of the policy definition')
+param policyDefinitionName string = 'deny-expensive-appserviceplan-skus'
+
+@description('Display name shown in Azure Policy blade')
+param policyDisplayName string = 'Deny Expensive App Service Plan SKUs'
+
+@description('Policy description')
+param policyDescription string = 'Restricts App Service Plans to WS1 (Logic App Standard), EP1 (Function Premium), and PremiumV2 (Web App) tiers only. Denies WS2/WS3, EP2/EP3, and PremiumV3. VNet Injection behaves identically on WS1 for Function Apps, Web Apps, and Logic App Standard, so higher tiers are unnecessary cost unless scale requires EP1/PremiumV2.'
+
+resource denyExpensiveAppServicePlanPolicy 'Microsoft.Authorization/policyDefinitions@2021-06-01' = {
+  name: policyDefinitionName
+  properties: {
+    displayName: policyDisplayName
+    description: policyDescription
+    policyType: 'Custom'
+    mode: 'All'
+    metadata: {
+      category: 'App Service'
+      version: '1.0.0'
+    }
+    parameters: {
+      allowedSizes: {
+        type: 'Array'
+        metadata: {
+          displayName: 'Allowed App Service Plan Sizes'
+          description: 'List of permitted SKU names across all App Service Plan workload types.'
+        }
+        defaultValue: allowedAppServicePlanSizes
+      }
+    }
+    policyRule: {
+      if: {
+        allOf: [
+          {
+            field: 'type'
+            equals: 'Microsoft.Web/serverfarms'
+          }
+          {
+            not: {
+              field: 'Microsoft.Web/serverfarms/sku.name'
+              in: '[parameters(\'allowedSizes\')]'
+            }
+          }
+        ]
+      }
+      then: {
+        effect: 'Deny'
+      }
+    }
+  }
+}
+
+output policyDefinitionId string = denyExpensiveAppServicePlanPolicy.id
+output policyDefinitionName string = denyExpensiveAppServicePlanPolicy.name
+
+
+
+
+
+
+// policyDefinition-denyEventHubPremium.bicep
+// Policy Definition: Deny Event Hub Premium tier SKU
+// Deploy once (subscription/MG scope), then wire to rgPolicyAssignment.bicep /
+// subscriptionPolicyAssignment.bicep same as the APIM and tagging policies.
+
+targetScope = 'subscription'
+
+@description('Toggle to allow or block Event Hub Premium tier deployments. false = Premium tier denied.')
+param allowEventHubPremium bool = false
+
+@description('Name of the policy definition')
+param policyDefinitionName string = 'deny-eventhub-premium-tier'
+
+@description('Display name shown in Azure Policy blade')
+param policyDisplayName string = 'Deny Event Hub Premium Tier'
+
+@description('Policy description')
+param policyDescription string = 'This policy denies the deployment of Azure Event Hub Namespaces using the Premium SKU tier.'
+
+resource denyEventHubPremiumPolicy 'Microsoft.Authorization/policyDefinitions@2021-06-01' = {
+  name: policyDefinitionName
+  properties: {
+    displayName: policyDisplayName
+    description: policyDescription
+    policyType: 'Custom'
+    mode: 'All'
+    metadata: {
+      category: 'Event Hub'
+      version: '1.0.0'
+    }
+    parameters: {
+      allowPremiumTier: {
+        type: 'Boolean'
+        metadata: {
+          displayName: 'Allow Premium Tier'
+          description: 'If false, Premium tier Event Hub Namespace deployments are denied.'
+        }
+        defaultValue: allowEventHubPremium
+      }
+    }
+    policyRule: {
+      if: {
+        allOf: [
+          {
+            field: 'type'
+            equals: 'Microsoft.EventHub/namespaces'
+          }
+          {
+            field: 'Microsoft.EventHub/namespaces/sku.name'
+            equals: 'Premium'
+          }
+          {
+            value: '[parameters(\'allowPremiumTier\')]'
+            equals: false
+          }
+        ]
+      }
+      then: {
+        effect: 'Deny'
+      }
+    }
+  }
+}
+
+output policyDefinitionId string = denyEventHubPremiumPolicy.id
+output policyDefinitionName string = denyEventHubPremiumPolicy.name
+
+
+
+
+// policyDefinition-denyApimPremium.bicep
+// Policy Definition: Deny APIM Premium tier SKU
+// Deploy this once (subscription/MG scope), then wire to your existing
+// rgPolicyAssignment.bicep / subscriptionPolicyAssignment.bicep modules.
+
+targetScope = 'subscription'
+
+@description('Toggle to allow or block APIM Premium tier deployments. false = Premium tier denied.')
+param allowApimPremium bool = false
+
+@description('Name of the policy definition')
+param policyDefinitionName string = 'deny-apim-premium-tier'
+
+@description('Display name shown in Azure Policy blade')
+param policyDisplayName string = 'Deny APIM Premium Tier'
+
+@description('Policy description')
+param policyDescription string = 'This policy denies the deployment of Azure API Management instances using the Premium SKU tier.'
+
+resource denyApimPremiumPolicy 'Microsoft.Authorization/policyDefinitions@2021-06-01' = {
+  name: policyDefinitionName
+  properties: {
+    displayName: policyDisplayName
+    description: policyDescription
+    policyType: 'Custom'
+    mode: 'All'
+    metadata: {
+      category: 'API Management'
+      version: '1.0.0'
+    }
+    parameters: {
+      allowPremiumTier: {
+        type: 'Boolean'
+        metadata: {
+          displayName: 'Allow Premium Tier'
+          description: 'If false, Premium tier APIM deployments are denied.'
+        }
+        defaultValue: allowApimPremium
+      }
+    }
+    policyRule: {
+      if: {
+        allOf: [
+          {
+            field: 'type'
+            equals: 'Microsoft.ApiManagement/service'
+          }
+          {
+            field: 'Microsoft.ApiManagement/service/sku.name'
+            equals: 'Premium'
+          }
+          {
+            value: '[parameters(\'allowPremiumTier\')]'
+            equals: false
+          }
+        ]
+      }
+      then: {
+        effect: 'Deny'
+      }
+    }
+  }
+}
+
+output policyDefinitionId string = denyApimPremiumPolicy.id
+output policyDefinitionName string = denyApimPremiumPolicy.name
