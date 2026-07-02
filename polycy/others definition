@@ -213,3 +213,188 @@ resource denyApimPremiumPolicy 'Microsoft.Authorization/policyDefinitions@2021-0
 
 output policyDefinitionId string = denyApimPremiumPolicy.id
 output policyDefinitionName string = denyApimPremiumPolicy.name
+
+
+
+targetScope = 'subscription'
+
+// ============================================================
+// main.bicep — Policy definitions + resource group assignments
+// Deploys the four custom policy definitions once at
+// subscription scope, then loops over the supplied resource
+// group list and assigns each policy to every RG.
+//
+// Deploy with:
+//   az deployment sub create \
+//     --location uksouth \
+//     --template-file main.bicep \
+//     --parameters main.bicepparam
+// ============================================================
+
+// ---------------- Parameters ----------------
+
+@description('Environment identifier used in assignment names (e.g. DEV, TRN, PRD).')
+param environment string
+
+@description('List of resource group names the policies will be assigned to.')
+param resourceGroupNames array
+
+@description('Toggle to allow or block APIM Premium tier deployments. false = Premium tier denied.')
+param allowApimPremium bool = false
+
+@description('Toggle to allow or block Event Hub Premium tier deployments. false = Premium tier denied.')
+param allowEventHubPremium bool = false
+
+@description('List of allowed App Service Plan SKU names (Function App, Web App, or Logic App Standard).')
+param allowedAppServicePlanSizes array = [
+  'WS1'
+  'EP1'
+  'P1V2'
+  'P2V2'
+]
+
+@description('Tag names that must exist on every resource group.')
+param requiredTags array
+
+// ---------------- Policy definitions (subscription scope) ----------------
+
+module apimPolicyDefinition './apimPolicyDefinition.bicep' = {
+  name: 'def-apim-premium-${environment}'
+  params: {
+    allowApimPremium: allowApimPremium
+  }
+}
+
+module eventHubPolicyDefinition './eventHubPolicyDefinition.bicep' = {
+  name: 'def-eventhub-premium-${environment}'
+  params: {
+    allowEventHubPremium: allowEventHubPremium
+  }
+}
+
+module appServicePlanPolicyDefinition './appServicePlanPolicyDefinition.bicep' = {
+  name: 'def-asp-skus-${environment}'
+  params: {
+    allowedAppServicePlanSizes: allowedAppServicePlanSizes
+  }
+}
+
+module tagPolicyDefinition './tagPolicyDefinition.bicep' = {
+  name: 'def-mandatory-tags-${environment}'
+  params: {
+    requiredTags: requiredTags
+  }
+}
+
+// ---------------- Resource group assignments ----------------
+// One assignment per policy per resource group in the list.
+// All four are Deny policies, so no managed identity is needed
+// (policyIdentityType defaults to 'None' in rgAssignment.bicep).
+
+module apimRgAssignments './rgAssignment.bicep' = [for rg in resourceGroupNames: {
+  name: 'assign-apim-${rg}'
+  scope: resourceGroup(rg)
+  params: {
+    policyAssignmentName: 'deny-apim-premium-tier'
+    policyDefinitionId: apimPolicyDefinition.outputs.policyDefinitionId
+    policyDisplayName: 'Deny APIM Premium Tier'
+    policyParameters: {
+      allowPremiumTier: {
+        value: allowApimPremium
+      }
+    }
+  }
+}]
+
+module eventHubRgAssignments './rgAssignment.bicep' = [for rg in resourceGroupNames: {
+  name: 'assign-eventhub-${rg}'
+  scope: resourceGroup(rg)
+  params: {
+    policyAssignmentName: 'deny-eventhub-premium-tier'
+    policyDefinitionId: eventHubPolicyDefinition.outputs.policyDefinitionId
+    policyDisplayName: 'Deny Event Hub Premium Tier'
+    policyParameters: {
+      allowPremiumTier: {
+        value: allowEventHubPremium
+      }
+    }
+  }
+}]
+
+module appServicePlanRgAssignments './rgAssignment.bicep' = [for rg in resourceGroupNames: {
+  name: 'assign-asp-${rg}'
+  scope: resourceGroup(rg)
+  params: {
+    policyAssignmentName: 'deny-expensive-asp-skus'
+    policyDefinitionId: appServicePlanPolicyDefinition.outputs.policyDefinitionId
+    policyDisplayName: 'Deny Expensive App Service Plan SKUs'
+    policyParameters: {
+      allowedSizes: {
+        value: allowedAppServicePlanSizes
+      }
+    }
+  }
+}]
+
+module tagRgAssignments './rgAssignment.bicep' = [for rg in resourceGroupNames: {
+  name: 'assign-tags-${rg}'
+  scope: resourceGroup(rg)
+  params: {
+    policyAssignmentName: 'enforce-mandatory-tags-rg'
+    policyDefinitionId: tagPolicyDefinition.outputs.policyDefinitionId
+    policyDisplayName: 'Enforce mandatory tags on Resource Groups'
+    // requiredTags is compiled into the policy rule inside
+    // tagPolicyDefinition.bicep, so no runtime parameters here.
+  }
+}]
+
+// ---------------- Outputs ----------------
+
+output apimPolicyDefinitionId string = apimPolicyDefinition.outputs.policyDefinitionId
+output eventHubPolicyDefinitionId string = eventHubPolicyDefinition.outputs.policyDefinitionId
+output appServicePlanPolicyDefinitionId string = appServicePlanPolicyDefinition.outputs.policyDefinitionId
+output tagPolicyDefinitionId string = tagPolicyDefinition.outputs.policyDefinitionId
+
+output apimAssignmentIds array = [for (rg, i) in resourceGroupNames: apimRgAssignments[i].outputs.policyAssignmentId]
+output eventHubAssignmentIds array = [for (rg, i) in resourceGroupNames: eventHubRgAssignments[i].outputs.policyAssignmentId]
+output appServicePlanAssignmentIds array = [for (rg, i) in resourceGroupNames: appServicePlanRgAssignments[i].outputs.policyAssignmentId]
+output tagAssignmentIds array = [for (rg, i) in resourceGroupNames: tagRgAssignments[i].outputs.policyAssignmentId]
+
+
+
+
+using './main.bicep'
+
+// DEV example — clone per environment (main.dev.bicepparam,
+// main.trn.bicepparam, main.prd.bicepparam)
+
+param environment = 'DEV'
+
+// Resource groups that receive all four policy assignments.
+// Replace with the actual RG names for this environment.
+param resourceGroupNames = [
+  'rg---dev'
+  'rg--dev'
+  'rg--dev'
+  'rg--dev'
+]
+
+// Premium tier toggles — false means Premium deployments are denied.
+param allowApimPremium = false
+param allowEventHubPremium = false
+
+// Allowed App Service Plan SKUs across all workload types.
+param allowedAppServicePlanSizes = [
+  'WS1'
+  'EP1'
+  'P1V2'
+  'P2V2'
+]
+
+// Tags that must exist on every resource group.
+param requiredTags = [
+  'CostCentre'
+  'Environment'
+  'Owner'
+  'Project'
+]
