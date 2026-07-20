@@ -1,0 +1,543 @@
+bicep// =============================================================================
+// main.bicep — 
+// =============================================================================
+
+targetScope = 'resourceGroup'
+
+// -----------------------------------------------------------------------------
+// Shared parameters
+// -----------------------------------------------------------------------------
+@description(' . naming convention, e.g. .')
+param subscriptionCode string
+
+@description('Region short code used in resource names')
+param regionShort string = 'uks'
+
+@description('Deployment region')
+@allowed([
+  'uksouth'
+  'ukwest'
+])
+param location string = 'uksouth'
+
+@description('Environment identifier used in tags and names')
+param environment string = 'dev'
+
+@description('Tags — keys enforced by . tagging policy (deny effect). Populate all mandated keys.')
+param tags object
+
+@description('Full resource ID of the private-endpoints subnet in the .-vended VNet')
+param privateEndpointSubnetId string
+
+// -----------------------------------------------------------------------------
+// Cosmos DB parameters
+// -----------------------------------------------------------------------------
+param cosmosInstanceId string = '01'
+param cosmosDatabaseName string
+param cosmosContainers array = []
+param cosmosServerless bool = true
+param cosmosDataContributorPrincipalIds array = []
+
+// -----------------------------------------------------------------------------
+// Service Bus parameters
+// -----------------------------------------------------------------------------
+param serviceBusInstanceId string = '01'
+param serviceBusQueues array = []
+param serviceBusTopics array = []
+param enableCmk bool = true
+param cmkUserAssignedIdentityId string = ''
+param cmkKeyName string = ''
+param cmkKeyVaultUri string = ''
+
+// -----------------------------------------------------------------------------
+// Naming (. CAF convention: [abbrev]-[subscription]-[region]-[id])
+// -----------------------------------------------------------------------------
+var cosmosAccountName = 'cosmos-${subscriptionCode}-${regionShort}-${cosmosInstanceId}'
+var serviceBusNamespaceName = 'sb-${subscriptionCode}-${regionShort}-${serviceBusInstanceId}'
+
+// =============================================================================
+// STEP 1a — Cosmos DB account (no PE yet)
+// =============================================================================
+module cosmosDb 'modules/cosmosdb.bicep' = {
+  name: 'deploy-cosmosdb-${environment}'
+  params: {
+    cosmosAccountName: cosmosAccountName
+    location: location
+    databaseName: cosmosDatabaseName
+    containers: cosmosContainers
+    serverless: cosmosServerless
+    dataContributorPrincipalIds: cosmosDataContributorPrincipalIds
+    tags: tags
+  }
+}
+
+// =============================================================================
+// STEP 1b — Service Bus namespace (Premium, MU=1, CMK before queues/topics)
+// =============================================================================
+module serviceBus 'modules/servicebus.bicep' = {
+  name: 'deploy-servicebus-${environment}'
+  params: {
+    serviceBusNamespaceName: serviceBusNamespaceName
+    location: location
+    messagingUnits: 1
+    enableCmk: enableCmk
+    cmkUserAssignedIdentityId: cmkUserAssignedIdentityId
+    cmkKeyName: cmkKeyName
+    cmkKeyVaultUri: cmkKeyVaultUri
+    queues: serviceBusQueues
+    topics: serviceBusTopics
+    tags: tags
+  }
+}
+
+// =============================================================================
+// STEP 2 — Private Endpoints (separate modules, after accounts exist)
+// =============================================================================
+module cosmosPrivateEndpoint 'modules/privateEndpoint.bicep' = {
+  name: 'deploy-pe-cosmos-${environment}'
+  params: {
+    privateEndpointName: 'pe-${cosmosAccountName}'
+    location: location
+    targetResourceId: cosmosDb.outputs.cosmosAccountId
+    groupId: 'Sql'
+    subnetId: privateEndpointSubnetId
+    tags: tags
+  }
+  // ordering enforced implicitly: targetResourceId consumes cosmosDb.outputs
+}
+
+module serviceBusPrivateEndpoint 'modules/privateEndpoint.bicep' = {
+  name: 'deploy-pe-servicebus-${environment}'
+  params: {
+    privateEndpointName: 'pe-${serviceBusNamespaceName}'
+    location: location
+    targetResourceId: serviceBus.outputs.serviceBusNamespaceId
+    groupId: 'namespace'
+    subnetId: privateEndpointSubnetId
+    tags: tags
+  }
+  // ordering enforced implicitly: targetResourceId consumes serviceBus.outputs
+}
+
+// -----------------------------------------------------------------------------
+// Outputs
+// -----------------------------------------------------------------------------
+output cosmosAccountName string = cosmosDb.outputs.cosmosAccountName
+output cosmosPrivateEndpointIp string = cosmosPrivateEndpoint.outputs.privateEndpointIp
+output serviceBusNamespaceName string = serviceBus.outputs.serviceBusNamespaceName
+output serviceBusEndpoint string = serviceBus.outputs.serviceBusEndpoint
+output serviceBusPrivateEndpointIp string = serviceBusPrivateEndpoint.outputs.privateEndpointIp
+
+
+main.dev.bicepparam
+
+bicep// =============================================================================
+// main.dev.bicepparam — DEV environment parameters
+//
+// Replace the placeholder values marked <...> with your actual subscription
+// code, subnet resource ID, Key Vault details and principal IDs before running.
+// =============================================================================
+
+using 'main.bicep'
+
+// -----------------------------------------------------------------------------
+// Platform
+// -----------------------------------------------------------------------------
+param subscriptionCode = '.'          
+param regionShort = 'uks'
+param location = 'uksouth'
+param environment = 'dev'
+
+// Tags — keys are policy-enforced with deny effect; all mandated keys required
+param tags = {
+  environment: 'dev'
+  project: ''
+  costCentre: '<cost-centre>'
+  owner: '<team-owner>'
+  serviceName: ''
+}
+
+// Private-endpoints subnet in the .-vended VNet 
+param privateEndpointSubnetId = '/subscriptions/<sub-guid>/resourceGroups/rg-.-uks-network/providers/Microsoft.Network/virtualNetworks/vnet-.-uks-01/subnets/<private-endpoints-subnet>'
+
+// -----------------------------------------------------------------------------
+// Cosmos DB (SQL API) — serverless for dev
+// -----------------------------------------------------------------------------
+param cosmosInstanceId = '01'
+param cosmosDatabaseName = 'vosdb'
+param cosmosServerless = true
+param cosmosContainers = [
+  {
+    name: 'valuations'
+    partitionKeyPath: '/caseId'
+  }
+  {
+    name: 'reference-data'
+    partitionKeyPath: '/dataType'
+  }
+]
+
+// Local auth is disabled, so grant data-plane access here (managed identity
+// object IDs of the consuming Function Apps / Web Apps) to avoid 403s
+param cosmosDataContributorPrincipalIds = [
+  // '<function-app-managed-identity-object-id>'
+  // '<web-app-managed-identity-object-id>'
+]
+
+// -----------------------------------------------------------------------------
+// Service Bus — Premium , 1 messaging unit 
+// -----------------------------------------------------------------------------
+param serviceBusInstanceId = '01'
+
+// CMK must be in place BEFORE queues/topics exist. Key Vault requires
+// soft delete + purge protection enabled.
+param enableCmk = true
+param cmkUserAssignedIdentityId = '/subscriptions/<sub-guid>/resourceGroups/rg-.-uks-vos/providers/Microsoft.ManagedIdentity/userAssignedIdentities/umi-.-vos-dev-sbcmk'
+param cmkKeyName = 'sb-cmk-dev'
+param cmkKeyVaultUri = 'https://kv-.-uks-01.vault.azure.net/'
+
+param serviceBusQueues = [
+  {
+    name: 'valuation-requests'
+    maxDeliveryCount: 10
+    ttl: 'P14D'
+  }
+]
+
+param serviceBusTopics = [
+  {
+    name: 'valuation-events'
+    ttl: 'P14D'
+  }
+]
+
+
+modules/cosmosdb.bicep
+
+bicep// =============================================================================
+// Module: cosmosdb.bicep
+
+// =============================================================================
+
+@description('Cosmos DB account name, e.g. cosmos-.-uks-01')
+param cosmosAccountName string
+
+@description('Deployment region — policy restricted to UK South / UK West')
+@allowed([
+  'uksouth'
+  'ukwest'
+])
+param location string = 'uksouth'
+
+@description('Name of the SQL database to create')
+param databaseName string
+
+@description('Containers to create within the database')
+param containers array = [
+  // { name: 'container1', partitionKeyPath: '/id', throughput: 400 }
+]
+
+@description('Use serverless capacity mode (recommended for dev) instead of provisioned throughput')
+param serverless bool = true
+
+@description('Principal IDs (managed identities / users) to be granted Cosmos DB Built-in Data Contributor at account scope. Required because local auth is disabled.')
+param dataContributorPrincipalIds array = []
+
+@description('Resource tags — keys are enforced by . tagging policy (deny effect)')
+param tags object
+
+// -----------------------------------------------------------------------------
+// Cosmos DB Account
+// -----------------------------------------------------------------------------
+resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
+  name: cosmosAccountName
+  location: location
+  tags: tags
+  kind: 'GlobalDocumentDB'
+  identity: {
+    type: 'SystemAssigned'
+  }
+  properties: {
+    databaseAccountOfferType: 'Standard'
+    // --- ELZ guardrails ---
+    publicNetworkAccess: 'Disabled'      
+    disableLocalAuth: true               
+    // ----------------------
+    minimalTlsVersion: 'Tls12'
+    locations: [
+      {
+        locationName: location
+        failoverPriority: 0
+        isZoneRedundant: false
+      }
+    ]
+    consistencyPolicy: {
+      defaultConsistencyLevel: 'Session'
+    }
+    capabilities: serverless
+      ? [
+          {
+            name: 'EnableServerless'
+          }
+        ]
+      : []
+    backupPolicy: {
+      type: 'Continuous'
+      continuousModeProperties: {
+        tier: 'Continuous7Days'
+      }
+    }
+    networkAclBypass: 'None'
+    isVirtualNetworkFilterEnabled: false 
+  }
+}
+
+// -----------------------------------------------------------------------------
+// SQL Database
+// -----------------------------------------------------------------------------
+resource sqlDatabase 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2024-05-15' = {
+  parent: cosmosAccount
+  name: databaseName
+  properties: {
+    resource: {
+      id: databaseName
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Containers
+// -----------------------------------------------------------------------------
+resource sqlContainers 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-05-15' = [
+  for container in containers: {
+    parent: sqlDatabase
+    name: container.name
+    properties: {
+      resource: {
+        id: container.name
+        partitionKey: {
+          paths: [
+            container.partitionKeyPath
+          ]
+          kind: 'Hash'
+          version: 2
+        }
+      }
+      options: serverless
+        ? {}
+        : {
+            throughput: container.?throughput ?? 400
+          }
+    }
+  }
+]
+
+// -----------------------------------------------------------------------------
+// SQL Role Assignments (data plane) — avoids 403s post-deployment
+// Built-in role: Cosmos DB Built-in Data Contributor
+// -----------------------------------------------------------------------------
+var cosmosDataContributorRoleId = ''
+
+resource sqlRoleAssignments 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = [
+  for principalId in dataContributorPrincipalIds: {
+    parent: cosmosAccount
+    name: guid(cosmosAccount.id, principalId, cosmosDataContributorRoleId)
+    properties: {
+      roleDefinitionId: '${cosmosAccount.id}/sqlRoleDefinitions/${cosmosDataContributorRoleId}'
+      principalId: principalId
+      scope: cosmosAccount.id
+    }
+  }
+]
+
+// -----------------------------------------------------------------------------
+// Outputs — consumed by the Private Endpoint module (step 2)
+// -----------------------------------------------------------------------------
+output cosmosAccountId string = cosmosAccount.id
+output cosmosAccountName string = cosmosAccount.name
+output systemAssignedIdentityPrincipalId string = cosmosAccount.identity.principalId
+
+
+modules/servicebus.bicep
+
+bicep// =============================================================================
+// Module: servicebus.bicep
+// =============================================================================
+
+@description('Service Bus namespace name, e.g. sb-.-uks-01 (must be globally unique)')
+param serviceBusNamespaceName string
+
+@description('Deployment region')
+@allowed([
+  'uksouth'
+  'ukwest'
+])
+param location string = 'uksouth'
+
+@description('Messaging units — capped at 1 per CG cost-control policy')
+@allowed([
+  1
+])
+param messagingUnits int = 1
+
+@description('Enable customer-managed key encryption. Must be true before queues/topics are created per . pattern. May be false for throwaway POC validation only.')
+param enableCmk bool = true
+
+@description('Resource ID of the user-assigned managed identity used to access the Key Vault key (required when enableCmk = true)')
+param cmkUserAssignedIdentityId string = ''
+
+@description('Key Vault key name for CMK (Key Vault must have soft delete + purge protection enabled)')
+param cmkKeyName string = ''
+
+@description('Key Vault URI, e.g. https://kv-.-uks-01.vault.azure.net/ (required when enableCmk = true)')
+param cmkKeyVaultUri string = ''
+
+@description('Queues to create — only deployed once encryption is in place')
+param queues array = []
+
+@description('Topics to create — only deployed once encryption is in place')
+param topics array = []
+
+@description('Resource tags — keys enforced by . tagging policy (deny effect)')
+param tags object
+
+// -----------------------------------------------------------------------------
+// Service Bus Namespace (Premium)
+// -----------------------------------------------------------------------------
+resource serviceBusNamespace 'Microsoft.ServiceBus/namespaces@2024-01-01' = {
+  name: serviceBusNamespaceName
+  location: location
+  tags: tags
+  sku: {
+    name: 'Premium'     
+    tier: 'Premium'
+    capacity: messagingUnits
+  }
+  identity: enableCmk
+    ? {
+        type: 'SystemAssigned, UserAssigned'
+        userAssignedIdentities: {
+          '${cmkUserAssignedIdentityId}': {}
+        }
+      }
+    : {
+        type: 'SystemAssigned'
+      }
+  properties: {
+    // --- ELZ guardrails ---
+    minimumTlsVersion: '1.2'             
+    disableLocalAuth: true               
+    publicNetworkAccess: 'Disabled'      
+    // ----------------------
+    zoneRedundant: false
+    premiumMessagingPartitions: 1
+    encryption: enableCmk
+      ? {
+          keySource: 'Microsoft.KeyVault'
+          requireInfrastructureEncryption: false
+          keyVaultProperties: [
+            {
+              keyName: cmkKeyName
+              keyVaultUri: cmkKeyVaultUri
+              identity: {
+                userAssignedIdentity: cmkUserAssignedIdentityId
+              }
+            }
+          ]
+        }
+      : null
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Queues — created AFTER namespace (and therefore after CMK is applied)
+// -----------------------------------------------------------------------------
+resource sbQueues 'Microsoft.ServiceBus/namespaces/queues@2024-01-01' = [
+  for queue in queues: {
+    parent: serviceBusNamespace
+    name: queue.name
+    properties: {
+      maxDeliveryCount: queue.?maxDeliveryCount ?? 10
+      lockDuration: queue.?lockDuration ?? 'PT1M'
+      defaultMessageTimeToLive: queue.?ttl ?? 'P14D'
+      deadLetteringOnMessageExpiration: true
+      requiresDuplicateDetection: queue.?duplicateDetection ?? false
+      enablePartitioning: false
+    }
+  }
+]
+
+// -----------------------------------------------------------------------------
+// Topics
+// -----------------------------------------------------------------------------
+resource sbTopics 'Microsoft.ServiceBus/namespaces/topics@2024-01-01' = [
+  for topic in topics: {
+    parent: serviceBusNamespace
+    name: topic.name
+    properties: {
+      defaultMessageTimeToLive: topic.?ttl ?? 'P14D'
+      requiresDuplicateDetection: topic.?duplicateDetection ?? false
+      enablePartitioning: false
+    }
+  }
+]
+
+// -----------------------------------------------------------------------------
+// Outputs — consumed by the Private Endpoint module (step 2)
+// -----------------------------------------------------------------------------
+output serviceBusNamespaceId string = serviceBusNamespace.id
+output serviceBusNamespaceName string = serviceBusNamespace.name
+output serviceBusEndpoint string = serviceBusNamespace.properties.serviceBusEndpoint
+output systemAssignedIdentityPrincipalId string = serviceBusNamespace.identity.principalId
+
+
+modules/privateEndpoint.bicep
+
+bicep// =============================================================================
+// Module: privateEndpoint.bicep
+
+// =============================================================================
+
+@description('Private Endpoint name, e.g. pe-cosmos-.-uks-01')
+param privateEndpointName string
+
+@description('Deployment region')
+param location string = 'uksouth'
+
+@description('Resource ID of the target resource (Cosmos account / Service Bus namespace)')
+param targetResourceId string
+
+@description('Sub-resource / group ID for the private link connection, e.g. Sql or namespace')
+param groupId string
+
+@description('Full resource ID of the CG subnet the PE NIC will be placed into (in the .-vended VNet — referenced only, never written to)')
+param subnetId string
+
+@description('Resource tags')
+param tags object
+
+resource privateEndpoint 'Microsoft.Network/privateEndpoints@2023-11-01' = {
+  name: privateEndpointName
+  location: location
+  tags: tags
+  properties: {
+    subnet: {
+      id: subnetId 
+    }
+    privateLinkServiceConnections: [
+      {
+        name: '${privateEndpointName}-plsc'
+        properties: {
+          privateLinkServiceId: targetResourceId
+          groupIds: [
+            groupId
+          ]
+        }
+      }
+    ]
+    customNetworkInterfaceName: '${privateEndpointName}-nic'
+  }
+}
+
+output privateEndpointId string = privateEndpoint.id
+output privateEndpointIp string = privateEndpoint.properties.customDnsConfig
