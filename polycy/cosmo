@@ -164,7 +164,7 @@ param privateEndpointSubnetId = '/subscriptions/<sub-guid>/resourceGroups/rg-.-u
 // Cosmos DB (SQL API) — serverless for dev
 // -----------------------------------------------------------------------------
 param cosmosInstanceId = '01'
-param cosmosDatabaseName = 'vosdb'
+param cosmosDatabaseName = '.db'
 param cosmosServerless = true
 param cosmosContainers = [
   {
@@ -192,7 +192,7 @@ param serviceBusInstanceId = '01'
 // CMK must be in place BEFORE queues/topics exist. Key Vault requires
 // soft delete + purge protection enabled.
 param enableCmk = true
-param cmkUserAssignedIdentityId = '/subscriptions/<sub-guid>/resourceGroups/rg-.-uks-vos/providers/Microsoft.ManagedIdentity/userAssignedIdentities/umi-.-vos-dev-sbcmk'
+param cmkUserAssignedIdentityId = '/subscriptions/<sub-guid>/resourceGroups/rg-.-uks-./providers/Microsoft.ManagedIdentity/userAssignedIdentities/umi-.-.-dev-sbcmk'
 param cmkKeyName = 'sb-cmk-dev'
 param cmkKeyVaultUri = 'https://kv-.-uks-01.vault.azure.net/'
 
