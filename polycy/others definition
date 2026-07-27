@@ -398,3 +398,44 @@ param requiredTags = [
   'Owner'
   'Project'
 ]
+
+
+targetScope = 'subscription'
+
+@description('Name of the policy definition')
+param policyDefinitionName string = 'deny-vm-vmss-deployment'
+
+@description('Display name shown in Azure Policy blade')
+param policyDisplayName string = 'Deny VM/VMSS Deployment'
+
+@description('Policy description')
+param policyDescription string = 'This policy denies the deployment of all Virtual Machines and Virtual Machine Scale Sets.'
+
+resource denyVmVmssPolicy 'Microsoft.Authorization/policyDefinitions@2021-06-01' = {
+  name: policyDefinitionName
+  properties: {
+    displayName: policyDisplayName
+    description: policyDescription
+    policyType: 'Custom'
+    mode: 'All'
+    metadata: {
+      category: 'Compute'
+      version: '1.0.0'
+    }
+    policyRule: {
+      if: {
+        field: 'type'
+        in: [
+          'Microsoft.Compute/virtualMachines'
+          'Microsoft.Compute/virtualMachineScaleSets'
+        ]
+      }
+      then: {
+        effect: 'Deny'
+      }
+    }
+  }
+}
+
+output policyDefinitionId string = denyVmVmssPolicy.id
+output policyDefinitionName string = denyVmVmssPolicy.name
