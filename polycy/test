@@ -1,0 +1,414 @@
+// =====================================================================
+//  BST-167213 - alz-dev-poc service connection validation
+//  Scope: RESOURCE GROUP (deploy into a fresh RG created via az)
+//
+//  Created fresh in this template:
+//    UMI -> Key Vault + key -> Storage -> LAW -> App Insights ->
+//    App Service Plan -> Function App -> Service Bus
+//
+//  Referenced as EXISTING (already in the landing zone):
+//    VNet + subnets (PE subnet + Function App integration subnet)
+// =====================================================================
+
+// ------------------------------ General -----------------------------
+
+@description('Azure region.')
+param location string = 'uksouth'
+
+@description('Tenant ID.')
+param tenantId string = subscription().tenantId
+
+@description('Object ID granted admin access on the Key Vault (your SP / group).')
+param keyVaultAdminObjectId string
+
+@description('Tags applied to resources.')
+param tags object = {}
+
+// ------------------- Networking (EXISTING - referenced) -------------
+
+@description('Resource group that contains the existing VNet.')
+param vnetResourceGroupName string = 'rg-.-uks-network'
+
+@description('Existing VNet name.')
+param vnetName string = 'vnet-.-uks'
+
+@description('Existing subnet used for all private endpoints.')
+param privateEndpointSubnetName string = 'snet-pe'
+
+@description('Existing subnet used for Function App VNet integration.')
+param integrationSubnetName string = 'snet-integration'
+
+// ------------------------- Identity ---------------------------------
+
+@description('User-assigned managed identity name.')
+param managedIdentityName string = 'id-.-uks-poc'
+
+// ------------------------- Key Vault --------------------------------
+
+@description('Key Vault name (globally unique, 3-24 chars).')
+param keyVaultName string = 'kv-.-uks-poc'
+
+@description('Encryption key name.')
+param encryptionKeyName string = 'cmk-.-poc'
+
+@description('Key expiration as a Unix epoch timestamp.')
+param keyExpiration int = 1830297600 // 2028-01-01
+
+// ------------------------- Storage ----------------------------------
+
+@description('Storage account name (lowercase, 3-24, no hyphens).')
+param storageAccountName string = 'st.ukspoc'
+
+// ------------------------- Monitoring -------------------------------
+
+@description('Log Analytics workspace name.')
+param logAnalyticsWorkspaceName string = 'log-.-uks-poc'
+
+@description('Log Analytics SKU.')
+param logAnalyticsWorkspaceSku string = 'PerGB2018'
+
+@description('Log Analytics retention (30-730).')
+param logAnalyticsRetentionDays int = 30
+
+@description('Application Insights name.')
+param appInsightsName string = 'appi-.-uks-poc'
+
+// ------------------------- App Service Plan / Function --------------
+
+@description('App Service Plan name.')
+param appServicePlanName string = 'plan-.-uks-poc'
+
+@description('App Service Plan SKU (EP1 on your ASP allowlist).')
+param appServicePlanSku string = 'EP1'
+
+@description('Function App name.')
+param functionAppName string = 'func-.-uks-poc'
+
+// ------------------------- Service Bus ------------------------------
+
+@description('Service Bus namespace name.')
+param serviceBusName string = 'sb-.-uks-poc'
+
+// ====================================================================
+//  Existing VNet + PE subnet (for the Service Bus subnet-id param)
+// ====================================================================
+
+resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' existing = {
+  name: vnetName
+  scope: resourceGroup(vnetResourceGroupName)
+}
+
+resource privateEndpointSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-01-01' existing = {
+  parent: vnet
+  name: privateEndpointSubnetName
+}
+
+// ====================================================================
+//  1. User-assigned managed identity
+// ====================================================================
+
+module uami '../../../bicep-modules/Bicep/modules/Security/userManagedIdentity.bicep' = {
+  name: 'deploy-uami'
+  params: {
+    location: location
+    identities: [
+      {
+        name: managedIdentityName
+        tags: tags
+      }
+    ]
+  }
+}
+
+// ====================================================================
+//  2. Key Vault (+ its own private endpoint) - grant UMI crypto access
+// ====================================================================
+
+module keyVault '../../../bicep-modules/Bicep/modules/Security/keyVault.bicep' = {
+  name: 'deploy-keyvault'
+  params: {
+    location: location
+    keyvaultName: keyVaultName
+    keyvaultVirtualNetworkResourceGroupName: vnetResourceGroupName
+    keyvaultVirtualNetworkName: vnetName
+    keyvaultPrivateEndpointSubnetName: privateEndpointSubnetName
+    tenantId: tenantId
+    KeyVaultEnableRbacAuthorization: false
+    keyVaultAccessPolicy: [
+      {
+        objectId: keyVaultAdminObjectId
+        permissions: {
+          keys: [ 'all' ]
+          secrets: [ 'all' ]
+          certificates: [ 'all' ]
+          storage: [ 'all' ]
+        }
+      }
+      {
+        objectId: uami.outputs.objectIds[0]
+        permissions: {
+          keys: [ 'get', 'wrapKey', 'unwrapKey' ]
+          secrets: [ 'get' ]
+          certificates: []
+          storage: []
+        }
+      }
+    ]
+    tags: tags
+    keyvaultPublicNetworkAccess: 'Disabled'
+  }
+}
+
+// ====================================================================
+//  3. Encryption key in the vault
+// ====================================================================
+
+module encryptionKey '../../../bicep-modules/Bicep/modules/Security/keyVaultCreateKey.bicep' = {
+  name: 'deploy-cmk'
+  params: {
+    KeyvaultName: keyVaultName
+    keyName: encryptionKeyName
+    keyExpiration: keyExpiration
+  }
+  dependsOn: [
+    keyVault
+  ]
+}
+
+// ====================================================================
+//  4. Storage account (CMK, UMI, private endpoints)
+// ====================================================================
+
+module storage '../../../bicep-modules/Bicep/modules/Storage/storageAccount.bicep' = {
+  name: 'deploy-storage'
+  params: {
+    location: location
+    storageAccountName: storageAccountName
+    storageAccountVirtualNetworkResourceGroupName: vnetResourceGroupName
+    storageAccountVirtualNetworkName: vnetName
+    storageAccountPrivateEndpointSubnetName: privateEndpointSubnetName
+    storageAccountKeyvaultName: keyVaultName
+    StorageAccountEncryptionKeyName: encryptionKeyName
+    storageAccountUserAssignedIdentityId: uami.outputs.identityResourceIds[0]
+    StorageAccountRequiresBlobPrivateEndpoint: true
+    publicNetworkAccess: 'Disabled'
+    tags: tags
+  }
+  dependsOn: [
+    encryptionKey
+  ]
+}
+
+// ====================================================================
+//  5. Log Analytics + Application Insights
+// ====================================================================
+
+module law '../../../bicep-modules/Bicep/modules/Monitoring/logAnalyticsWorkspace.bicep' = {
+  name: 'deploy-law'
+  params: {
+    LogAnalyticsWorkspaceName: logAnalyticsWorkspaceName
+    LogAnalyticsWorkspaceSku: logAnalyticsWorkspaceSku
+    LogAnalyticsWorkspaceRetentionDays: logAnalyticsRetentionDays
+    location: location
+    tags: tags
+  }
+}
+
+module appInsights '../../../bicep-modules/Bicep/modules/Monitoring/applicationInsights.bicep' = {
+  name: 'deploy-appinsights'
+  params: {
+    appInsightsName: appInsightsName
+    LogAnalyticsWorkspaceId: law.outputs.LogAnalyticsWorkspaceId
+    location: location
+    tags: tags
+  }
+}
+
+// ====================================================================
+//  6. App Service Plan
+//     VERIFY param/output names against appServicePlan.bicep
+// ====================================================================
+
+module appServicePlan '../../../bicep-modules/Bicep/modules/Compute/appServicePlan.bicep' = {
+  name: 'deploy-asp'
+  params: {
+    appServicePlanName: appServicePlanName
+    appServicePlanSkuName: appServicePlanSku
+    appServicePlanKind: 'elastic'
+    location: location
+    tags: tags
+  }
+}
+
+// ====================================================================
+//  7. Function App (+ its own private endpoint)
+// ====================================================================
+
+module functionApp '../../../bicep-modules/Bicep/modules/Compute/functionApp.bicep' = {
+  name: 'deploy-functionapp'
+  params: {
+    functionAppName: functionAppName
+    functionAppVirtualNetworkResourceGroupName: vnetResourceGroupName
+    functionAppVirtualNetworkName: vnetName
+    functionAppSubnetName: integrationSubnetName
+    functionAppPrivateEndpointSubnetName: privateEndpointSubnetName
+    functionAppUserAssignedManagedIdentityClientId: uami.outputs.clientIds[0]
+    functionAppUserAssignedIdentityId: uami.outputs.identityResourceIds[0]
+    functionAppPlanId: appServicePlan.outputs.appServicePlanId
+    applicationInsightsConnectionString: appInsights.outputs.appInsightsConnectionString
+    functionAppStorageAccountName: storage.outputs.storageAccountName
+    storageAccountConnectionString: storage.outputs.storageAccountConnectionString
+    location: location
+    tags: tags
+  }
+}
+
+// ====================================================================
+//  8. Service Bus (CMK, UMI, private endpoint, diagnostics)
+// ====================================================================
+
+module serviceBus '../../../bicep-modules/Bicep/modules/Messaging/serviceBus.bicep' = {
+  name: 'deploy-servicebus'
+  params: {
+    serviceBusName: serviceBusName
+    serviceBusSkuName: 'Premium'
+    serviceBusSkuCapacity: 1
+    serviceBusPrivateEndpointSubnetId: privateEndpointSubnet.id
+    serviceBusDisableLocalAuth: true
+    serviceBusMinimumTlsVersion: '1.2'
+    serviceBusPremiumMessagingPartitions: 1
+    serviceBusDisablePublicNetworkAccess: 'Disabled'
+    serviceBusZoneRedundant: false
+    serviceBusUserAssignedManagedIdentity: uami.outputs.identityResourceIds[0]
+    serviceBuskeyVaultUri: keyVault.outputs.keyVaultUri
+    encryptionKeyName: encryptionKeyName
+    serviceBusLogAnalyticsWorkspaceId: law.outputs.LogAnalyticsWorkspaceId
+    location: location
+    tags: tags
+  }
+  dependsOn: [
+    encryptionKey
+  ]
+}
+
+// ------------------------------ Outputs -----------------------------
+
+output managedIdentityId string = uami.outputs.identityResourceIds[0]
+output keyVaultUri string = keyVault.outputs.keyVaultUri
+output storageAccountName string = storage.outputs.storageAccountName
+output logAnalyticsWorkspaceId string = law.outputs.LogAnalyticsWorkspaceId
+output functionAppId string = functionApp.outputs.functionAppId
+
+
+
+
+
+
+using './main.bicep'
+
+// ---- General ----
+param location = 'uksouth'
+// tenantId defaults to subscription().tenantId - override if needed
+param keyVaultAdminObjectId = ''   // REQUIRED: object ID of your SP or admin group
+param tags = {
+  environment: 'poc'
+  project: 'BST-167213'
+  owner: 'DevOps'
+}
+
+// ---- Networking (EXISTING - point at your real LZ VNet/subnets) ----
+param vnetResourceGroupName = 'rg-.-uks-network'
+param vnetName = 'vnet-.-uks'
+param privateEndpointSubnetName = 'snet-pe'
+param integrationSubnetName = 'snet-integration'
+
+// ---- Identity ----
+param managedIdentityName = 'id-.-uks-poc'
+
+// ---- Key Vault ----
+param keyVaultName = 'kv-.-uks-poc'
+param encryptionKeyName = 'cmk-.-poc'
+param keyExpiration = 1830297600   // 2028-01-01 epoch
+
+// ---- Storage ----
+param storageAccountName = 'st.ukspoc'
+
+// ---- Monitoring ----
+param logAnalyticsWorkspaceName = 'log-.-uks-poc'
+param logAnalyticsWorkspaceSku = 'PerGB2018'
+param logAnalyticsRetentionDays = 30
+param appInsightsName = 'appi-.-uks-poc'
+
+// ---- App Service Plan / Function ----
+param appServicePlanName = 'plan-.-uks-poc'
+param appServicePlanSku = 'EP1'
+param functionAppName = 'func-.-uks-poc'
+
+// ---- Service Bus ----
+param serviceBusName = 'sb-.-uks-poc'
+
+
+Create the Azure DevOps YAML pipeline with RG creation as the first task
+bash
+
+cat > /mnt/user-data/outputs/azure-pipelines-poc.yml << 'EOF'
+# =====================================================================
+#  BST-167213 - alz-dev-poc service connection validation
+#  Task 1: create the resource group
+#  Task 2: deploy main.bicep (UMI, KV, storage, LAW, App Insights,
+#          plan, function app, service bus) into it
+# =====================================================================
+
+trigger: none            # run manually / on demand for the POC
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  serviceConnection: ''
+  resourceGroupName: 'rg-.-uks-poc'
+  location: 'uksouth'
+  templateFile: 'Infrastructure/Policy/Bicep/main.bicep'
+  parametersFile: 'Infrastructure/Policy/Bicep/main.bicepparam'
+
+stages:
+  - stage: Deploy
+    displayName: 'Deploy POC resources'
+    jobs:
+      - job: DeployJob
+        displayName: 'Create RG and deploy'
+        steps:
+
+          # -------- Task 1: Resource Group (Test 1) --------
+          - task: AzureCLI@2
+            displayName: 'Create resource group'
+            inputs:
+              azureSubscription: '$(serviceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az group create \
+                  --name "$(resourceGroupName)" \
+                  --location "$(location)" \
+                  --tags environment=poc project=BST-167213
+
+          # -------- Task 2: Bicep deployment (Test 2 & 3) --------
+          - task: AzureCLI@2
+            displayName: 'Deploy Bicep template'
+            inputs:
+              azureSubscription: '$(serviceConnection)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az deployment group create \
+                  --resource-group "$(resourceGroupName)" \
+                  --template-file "$(templateFile)" \
+                  --parameters "$(parametersFile)" \
+                  --name "poc-$(Build.BuildId)"
+EOF
+echo "pipeline written"
+Output
+
+pipeline written
+Done
+
