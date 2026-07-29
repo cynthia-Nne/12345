@@ -87,3 +87,6 @@ If we're asked to deploy it, the VM would need:
 The one dependency to be aware of: the extension needs outbound access to Entra ID and the Dataverse environment endpoints for developers to sign in. It'll install without that, but nobody will be able to connect to an environment. So it's tied to the same internet/conditional access work Aditya is picking up.
 
 Can you confirm which VM the architects have in mind — is it an existing one or something we'd stand up for the PoC? If it's new, we can build it with the prerequisites and the right egress from the start rather than retrofitting.
+
+
+That makes it easier — with a new build we can bake in VS Code, Node.js and the extension, and get the outbound endpoints allowed as part of the build rather than chasing it afterwards.
