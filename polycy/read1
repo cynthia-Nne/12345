@@ -77,4 +77,13 @@ output principalId string = identityType == 'SystemAssigned' ? assignment.identi
 
 
 
+Thanks Helen, that's clear. Yes, it's available and it's the right tool for that — Power Platform Tools is the supported extension for Power Pages development, and it's a Microsoft GA extension so no issue there.
 
+If we're asked to deploy it, the VM would need:
+• VS Code installed
+• Node.js installed on the same machine (a hard requirement for the Power Pages features specifically)
+• The extension itself — either from the VS Code Marketplace if the VM can reach it, or side-loaded from a .vsix if not, which is the supported offline method
+
+The one dependency to be aware of: the extension needs outbound access to Entra ID and the Dataverse environment endpoints for developers to sign in. It'll install without that, but nobody will be able to connect to an environment. So it's tied to the same internet/conditional access work Aditya is picking up.
+
+Can you confirm which VM the architects have in mind — is it an existing one or something we'd stand up for the PoC? If it's new, we can build it with the prerequisites and the right egress from the start rather than retrofitting.
