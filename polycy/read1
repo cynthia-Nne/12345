@@ -90,3 +90,20 @@ Can you confirm which VM the architects have in mind — is it an existing one o
 
 
 That makes it easier — with a new build we can bake in VS Code, Node.js and the extension, and get the outbound endpoints allowed as part of the build rather than chasing it afterwards.
+
+
+Here's the prompt with the corrections built in:
+
+> Write a concise  ticket comment (250 words max, plain prose, no headings, no bullet lists) summarising a completed Azure cost analysis for . Write it as a standalone professional work deliverable for a government programme audience — do not include any conversational or AI-chat framing, do not reference "the workbook", "the data you provided", or any earlier version of the analysis.
+>
+> Content to cover:
+> - Review period Jul 20 – Aug 18 2026, covering PROD, PPE and NFT VDL environments, including both the core resource groups and the Databricks Managed Resource Groups.
+> - Total estate cost £4,071.85, split PROD £1,753.58 (43%), PPE £1,251.40 (31%), NFT £1,066.87 (26%).
+> - Key finding: the Azure Databricks DBU line materially understates true Databricks platform cost, because managed resource group spend (VMs, storage, networking) is roughly double the DBU figure in PROD and PPE, and approximately 18x in NFT (~£700 managed vs £39.26 DBU).
+> - Azure Data Factory is the dominant cost driver across all three environments.
+> - SQL Database costs are stable and predictable: PROD £126.87, PPE £111.08, NFT £169.70.
+> - Forward forecast for August 2026: PROD £1,773.97, PPE £1,319.01, NFT £1,398.69, total £4,491.67, against £3,310.67 actual in July — a 36% increase.
+> - Most significant trend: NFT rising from £232.53 in July to £1,398.69 forecast in August, roughly 6x, as Databricks clusters and ADF workloads came into active use from early August.
+> - Note that Azure's NFT forecast may be conservative given the recent ramp.
+>
+> Close with a single sentence stating that the full detailed analysis is attached to the ticket.
