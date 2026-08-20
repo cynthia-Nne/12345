@@ -107,3 +107,21 @@ Here's the prompt with the corrections built in:
 > - Note that Azure's NFT forecast may be conservative given the recent ramp.
 >
 > Close with a single sentence stating that the full detailed analysis is attached to the ticket.
+
+
+Hi Helen,
+
+I've costed this against what's actually running in the lzn0193 landing zone.
+
+**Roughly £1,300–£1,600 a month** for the architecture as drawn.
+
+API Management is the biggest single line and the main variable. It's currently deployed on Developer tier, which is why we're only spending around £800/month today — but Developer carries no SLA, so it isn't a fair basis for the figure. On Standard v2, which supports the private gateway the design requires, it comes to £1,300–1,600. If it needs to be Premium v2 for full VNet injection or the 99.99% SLA, that rises to roughly £3,000–3,300.
+
+The remainder — Service Bus, Functions, monitoring, private endpoints, storage and Key Vault — is around £600–800/month. Microsoft Foundry isn't deployed yet and its cost will track document volumes; I've allowed £50–250/month, and can tighten that with an idea of expected throughput.
+
+Worth settling the APIM tier reasonably early, as changing it later means rebuilding the instance rather than a simple switch.
+
+Happy to firm any of this up if you need something more precise.
+
+Thanks,
+Nne
