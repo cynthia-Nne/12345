@@ -1,0 +1,348 @@
+I was wrong about the Hyperscale databases being small. I said their maxSizeGB of ~0 meant no size justification for Hyperscale. That reading was wrong. The value you saw was -9.31E-10, which is -1 ÷ 1073741824 — meaning maxSizeBytes = -1, Azure's way of saying "not applicable." For Hyperscale, maximum data storage size is set to 128 TB and isn't configurable, and you're charged only for allocated data storage, not maximum. So that field is meaningless for Hyperscale and tells you nothing about their real size. We still need to find that out.
+
+PART 1 — The Resource Graph sheet
+
+Your current query is missing four columns that turn out to matter a lot. Replace it with this:
+
+resources
+| where type == "microsoft.sql/servers/databases"
+| where name != "master"
+| extend server = tostring(split(id,'/')[8])
+| extend
+    tier            = tostring(sku.tier),
+    skuName         = tostring(sku.name),
+    capacity        = toint(sku.capacity),
+    minCapacity     = todouble(properties.minCapacity),
+    autoPauseDelay  = toint(properties.autoPauseDelay),
+    maxSizeBytes    = tolong(properties.maxSizeBytes),
+    status          = tostring(properties.status),
+    createdTime     = todatetime(properties.creationDate),
+    earliestRestore = todatetime(properties.earliestRestoreDate),
+    licenseType     = tostring(properties.licenseType),
+    backupRedundancy= tostring(properties.currentBackupStorageRedundancy),
+    zoneRedundant   = tostring(properties.zoneRedundant),
+    readScale       = tostring(properties.readScale),
+    elasticPoolId   = tostring(properties.elasticPoolId),
+    serviceObjective= tostring(properties.requestedServiceObjectiveName)
+| extend maxSizeGB = iff(maxSizeBytes <= 0, real(null), maxSizeBytes/1073741824.0)
+| extend capacityUnit = iff(tier in ("Basic","Standard","Premium"), "DTU", "vCore")
+| project resourceGroup, server, name, status, tier, skuName, serviceObjective,
+          capacity, capacityUnit, minCapacity, autoPauseDelay,
+          maxSizeGB, licenseType, backupRedundancy, zoneRedundant, readScale,
+          elasticPoolId, createdTime, earliestRestore, tags, id
+| order by capacity desc
+
+
+Why each new column earns its place
+
+licenseType — the single most valuable addition. LicenseIncluded means you're paying Microsoft for the SQL licence on that database. BasePrice means Azure Hybrid Benefit is already applied. This turns the ~£3,527/month licence meter from a lump sum into a per-database list of candidates.
+
+backupRedundancy — you have RA-GRS (geo-redundant) backup charges in a non-production subscription. Every database showing Geo or GeoZone is paying a premium for cross-region backup redundancy that non-prod almost certainly doesn't need.
+
+capacityUnit — solves the "800 vCores" misreading problem at source. Standard/Basic/Premium tiers report DTUs in the same field that vCore tiers use for cores. This column labels them correctly so nobody misreads your summary.
+
+maxSizeGB with the null guard — iff(maxSizeBytes <= 0, null, ...) turns Hyperscale's -1 into a blank instead of that nonsense negative. A blank correctly says "not applicable here."
+
+elasticPoolId — if any database sits in an elastic pool, its cost behaves completely differently (the pool is billed, not the database). You need to know before you analyse anything.
+
+readScale — an enabled read replica means you're paying for a second copy of the compute.
+
+earliestRestore — how far back point-in-time restore can reach. Relevant for anything you're considering deleting.
+
+The storage usage problem — you're right
+
+Resource Graph gives you maxSizeGB, which is the ceiling you provisioned. It cannot give you allocated or used space. Those live in Azure Monitor metrics, not in the resource properties.
+
+Three quantities, all different:
+
+
+	What it is	Where it lives
+Max size	The ceiling you set	Resource Graph
+Allocated	Disk space the files have claimed	Metric allocated_data_storage
+Used	Data actually inside those files	Metric storage
+
+The relationship is always used ≤ allocated ≤ max. And the file allocation doesn't shrink on its own, so allocated can sit high long after data was deleted.
+
+This matters because you cannot reduce max size below allocated. So if a database shows 350 GB used but 600 GB allocated, your floor is 600 GB, not 350 — unless you shrink the files first.
+
+Rather than querying each database by hand, run this once
+
+$sub = "3cf5a9a2-bc13-43e2-b97e-357215ab3a5d"
+$dbs = az graph query -q "resources
+  | where type=='microsoft.sql/servers/databases'
+  | where name != 'master'
+  | project id, name, server=tostring(split(id,'/')[8])" `
+  --first 1000 -o json | ConvertFrom-Json
+
+$out = foreach ($db in $dbs.data) {
+  try {
+    $m = az monitor metrics list --resource $db.id `
+      --metric "storage,allocated_data_storage" `
+      --interval PT1H --aggregation Maximum `
+      --start-time (Get-Date).AddDays(-2).ToString("yyyy-MM-ddTHH:mm:ssZ") `
+      -o json 2>$null | ConvertFrom-Json
+
+    $used = ($m.value | Where-Object name.value -eq 'storage').timeseries.data.maximum |
+            Measure-Object -Maximum | Select-Object -Expand Maximum
+    $alloc = ($m.value | Where-Object name.value -eq 'allocated_data_storage').timeseries.data.maximum |
+            Measure-Object -Maximum | Select-Object -Expand Maximum
+
+    [pscustomobject]@{
+      server      = $db.server
+      database    = $db.name
+      usedGB      = [math]::Round($used/1GB, 2)
+      allocatedGB = [math]::Round($alloc/1GB, 2)
+    }
+  } catch {
+    [pscustomobject]@{ server=$db.server; database=$db.name; usedGB=$null; allocatedGB=$null }
+  }
+}
+$out | Export-Csv storage-usage.csv -NoTypeInformation
+
+⚠️ Two caveats. Inaccessible databases won't return metrics — expect blanks for the arc11x six, and don't read that as "zero storage." And paused serverless databases may not have emitted metrics recently, so widen to 7 days if you get gaps.
+
+That gives you a third CSV to join on server / database.
+
+PART 2 — The Analysis tab headers
+
+Grouped by purpose. This is the version I'd build now, knowing what we know.
+
+A. Identity — who and where
+#	Header	Source
+1	Server	Resource Graph
+2	Database	Resource Graph
+3	Match key (server / database)	Formula
+4	Resource group	Resource Graph
+5	Environment (dev/sit/uat/test)	Derived from name
+6	Service tag	Resource Graph tags
+7	Project tag	Resource Graph tags
+
+Environment matters because it drives what's defensible. An 80-core dev database is indefensible; the same in a pre-prod performance environment might be justified.
+
+B. Configuration — what it is
+#	Header	Why
+8	Status	Online / Paused / Inaccessible. The column that surfaced Finding 1
+9	Tier	GeneralPurpose / Hyperscale / Standard / Basic
+10	SKU name	GP_Gen5 vs GP_S_Gen5 — the provisioned/serverless tell
+11	Compute model	Derived: Provisioned / Serverless / DTU / Hyperscale
+12	Capacity	The number
+13	Capacity unit	vCore or DTU — stops the 800-core misreading
+14	Min vCores	Your 24/7 spend floor
+15	Auto-pause delay	-1 = disabled
+16	Licence type	Hybrid Benefit candidate
+17	Backup redundancy	Geo-redundant in non-prod = waste
+18	Zone redundant	Extra cost, rarely needed in non-prod
+19	Elastic pool	Changes how cost is read
+20	Created date	
+21	Age (months)	Formula. Old + untouched = strong candidate
+C. Storage — three separate numbers
+#	Header
+22	Max size GB (provisioned ceiling)
+23	Allocated GB
+24	Used GB
+25	Used % of max
+26	Reclaimable GB (max − allocated)
+
+Column 26 is the honest one. It's what you can shrink today without touching data files.
+
+D. Cost — July 2026, split by meter
+#	Header	SUMIFS filter on Meter/Tier
+27	Compute cost	*vCore* or *DTU*
+28	Storage cost	*Data Stored*
+29	Licence cost	Tier contains *Licen*
+30	Backup cost	*Backup*
+31	Defender cost	ServiceName contains *Defender*
+32	Total	Sum of 27–31
+33	Annualised	Total × 12
+
+This is the fix for the problem you spotted. A £1,473 total means nothing until you know whether it's compute or storage — the two need completely different actions.
+
+E. Utilisation — leave blank for now
+#	Header
+34	Avg CPU / DTU % (30d)
+35	Max CPU / DTU % (30d)
+36	Successful connections (30d)
+
+Fill these only for the shortlist you actually intend to change. Pulling metrics for 60+ databases you'll never touch is wasted effort.
+
+F. Flags — calculated
+#	Header	Logic
+37	Flag: Status	Inaccessible → INVESTIGATE
+38	Flag: Auto-pause	-1 on GP Serverless → OFF
+39	Flag: Compute model	Provisioned / Hyperscale cannot pause
+40	Flag: Storage	Reclaimable > 100 GB
+41	Flag: Licence	LicenseIncluded
+42	Flag: Backup	Redundancy contains Geo
+43	Flag: Name	test/migration/staging/restore/tunning/temp
+44	Priority	1–4
+G. Decision — manual, yellow
+#	Header
+45	Reservation covered?
+46	IaC managed? (Bicep repo path)
+47	Owner contacted
+48	Owner response
+49	Recommended action
+50	Target configuration
+51	Est. monthly saving
+52	Change status
+53	Jira sub-task
+
+45 and 46 are not optional. Change a reserved database and the reservation strands — your saving evaporates. Change an IaC-managed database in the portal and the next pipeline run reverts it silently. Both need answering before any change, not after.
+
+PART 3 — The findings
+
+⚠️ Read this first. The July figures below are what I read off photographs taken at an angle, where the cost column was visibly offset from the row labels. Treat every number as indicative until you re-derive it from the CSV. Do not paste any figure from here into Jira before verifying it in Excel. I'd rather say that plainly than have a wrong number go in front of stakeholders.
+
+Finding 1 — Six Inaccessible databases (OPEN)
+
+Server: vos-iaz-sql-dev-arc11x-geo · RG: C190VOArgpBSTDev
+
+Database	Tier	Capacity	July cost
+OSAddressBase	Standard S7	800 DTU	~£1,051.74
+OSMM	GP Serverless	8 vCore	~£528.03
+GeoCuratedData	GP Serverless	8 vCore	~£417.28
+GeoLocators	Standard S3	100 DTU	~£118.15
+FMEShared	Standard S2	50 DTU	~£59.08
+SWEET	Standard S2	50 DTU	~£59.08
+			~£2,233
+
+Established:
+
+All six report status = Inaccessible
+TDE is set to customer-managed key on the server
+Portal error: access to Azure Key Vault has been lost
+Key sqltde in vault bst-iaz-kvt-dev-geo is Enabled, expires 13/08/2028 — the key itself is healthy
+Server key was linked 08/11/2025 17:38
+All six databases created 08/11/2025 between 17:43 and 18:26 — a single 48-minute build session
+Vault has 77 access policies, many resolving to unnamed GUIDs
+A policy exists for bst-iaz-sql-dev-geo with Get/WrapKey/UnwrapKey; no visible equivalent for vos-iaz-sql-dev-arc11x-geo
+Server Activity log: 70 events over 90 days, zero human-initiated, zero failures, last event Fri 21 Aug — six days of silence since
+
+Not yet established:
+
+Whether the policy is genuinely absent or hiding among the unnamed GUIDs (matching is by object ID, not name)
+The exact date access was lost
+Who or what removed it
+Whether the environment is still needed
+Whether the other two Inaccessible databases share this cause
+
+Why the "abandoned" theory is weak. I floated it earlier and I'd now push back on my own suggestion. The environment was deliberately built with customer-managed TDE, which is a security-conscious choice nobody makes for throwaway work. Six databases in 48 minutes on a Saturday evening reads like a planned build, not an experiment. And nobody reporting the outage may simply mean the users are a small team who assumed it was temporary. Treat "still needed" as the default assumption until the geospatial team says otherwise.
+
+Cost caveat: the ~£2,233 is July, when they were working. What they cost now while Inaccessible needs August daily data. DTU and storage will certainly still bill. Serverless compute is uncertain and I won't guess.
+
+Finding 2 — Three Hyperscale databases that cannot pause (NOT STARTED)
+Database	Server	Environment
+iazsqldbdapdev	-sql-dap-dev	DEV
+iazsqldbsit	-sql-sit-dap	SIT
+iazsqldbuat	-sql-uat-dap	UAT
+
+All three: HS_S_Gen5, max 40 vCores, min 5 vCores, autoPauseDelay = -1, status Online.
+
+The structural problem: serverless auto-pausing is only supported in the General Purpose tier. So each bills a minimum of 5 vCores continuously, forever, and no setting will change that.
+
+What I got wrong and you need to check: I claimed these were tiny databases. That was based on misreading the -1 size field. Their real size is unknown. Pull allocated_data_storage for all three — that number decides the entire finding. Multi-terabyte and Hyperscale is justified; a few hundred GB and it isn't.
+
+Constraint if you do propose a move: reverse migration from Hyperscale to General Purpose is only supported within 45 days of the original migration to Hyperscale. These are well past that, so it's an export/import exercise, not a tier toggle. Cost that in.
+
+Finding 3 — bstsitlarep: expensive by configuration (NOT STARTED)
+
+~£4,867 in July — your second most expensive database.
+
+GP_S_Gen5 · max 40 · min 20 vCores · autoPauseDelay 180 · 1,280 GB · Online.
+
+Serverless, so in principle it should be cheap. But two settings defeat it:
+
+min 20 vCores — a large guaranteed floor for every hour it's online
+180-minute delay — needs three unbroken hours of zero activity to pause. In any environment with a monitoring agent or connection pool, that gap never occurs
+
+This is the best value-for-effort item on the list. No tier change, no migration, no data movement — two numbers in the Compute + storage blade. Drop min toward 0.5 and the delay to 60, then watch a week of app_cpu_billed.
+
+Verify first: is this in an IaC repo? And does a reservation cover it?
+
+Finding 4 — vosiazsqldbdevndrdatasyncR2: provisioned 80 vCores in DEV (NOT STARTED)
+
+~£10,985 in July — your single most expensive database, in a dev environment.
+
+GP_Gen5 — note the absence of _S_. Provisioned, not serverless. Which is why minCapacity and autoPauseDelay are blank: those settings don't exist for it. It cannot pause. There is no configuration to correct.
+
+It is not listed anywhere in BST-167985. Neither are bst-iaz-sql-dev-geo / sweet (~£1,052) or bst-iaz-sql-test-dm / bstiazsqlstagingdbtestdm (~£817). The ticket's inventory was built by hand and has gaps — worth stating, because it's the argument for working from the cost export rather than the ticket's tables.
+
+Its cost splits across compute, licence and storage meters. Get the exact split from the CSV before proposing anything — the licence portion alone may be several hundred pounds a month and removable via Hybrid Benefit with no performance impact at all.
+
+Finding 5 — Paused databases, pure storage cost (NOT STARTED)
+Database	Max size	July cost
+bstdevlarep	4,096 GB	~£1,397
+bstdevpoststaging	3,000 GB	~£923
+bstdevmigration	3,274 GB	~£503
+bstdevlarep_Performance_Tunning	4,096 GB	~£495
+
+All four show Paused — auto-pause is working correctly, compute is near zero. Their cost is almost entirely storage, and storage bills 24/7 regardless of pause state.
+
+Right-sizing achieves nothing here; compute is already at its floor. The options are shrink the storage ceiling, or delete.
+
+Two of the four are named after one-off jobs. bstdevlarep and bstdevlarep_Performance_Tunning at 4,096 GB each on the same server suggests one is a copy of the other.
+
+Cross-cutting items (log, don't chase yet)
+Item	Indicative July value	Note
+Azure Hybrid Benefit	~£3,527/mo	licenseType column identifies exactly which databases
+Storage over-provisioning	~£5,660/mo total storage	GP storage billed on max configured, not used
+Defender for SQL	~£380/mo	~40 servers × ~£9.48 — a security policy question, not yours alone
+RA-GRS backups in non-prod	small but wrong	Geo-redundant backup in dev
+droppedserver LTR backups	~£25–80	Servers gone, backups still retained. Check statutory retention first
+⚠️ Reservation exists	£1,253 "Purchase"	Blocks Findings 3 and 4 until checked
+
+
+
+What to do next
+
+Do these four, in this order, before touching anything else.
+
+1. Close the access-policy question (30 min)
+bash
+az sql server show -g (resource group) \
+  -n (sql server name) \
+  --query identity.principalId -o tsv
+
+Search that GUID across all four pages of the vault's access policies. Absent, or present without Get/WrapKey/UnwrapKey — either way you have your confirmed root cause.
+
+2. Find when and who (30 min)
+
+Vault bst-iaz-kvt-dev-geo → Activity log → last 30 days → look at 18–24 August for Update Key Vault or role assignment changes. Also check resource group → Deployments for a Bicep run in that window. If the vault is IaC-managed, the fix belongs in the template, not the portal — otherwise the next pipeline run undoes it.
+
+3. Check the other two Inaccessible databases (15 min)
+bash
+az sql server key list -g (resource group) -n (server name) -o table
+az sql server key list -g (resource group) -n (server name) -o table
+
+Same vault means one fault across three servers — a materially bigger finding.
+
+4. Get August daily cost for the six (20 min)
+
+Cost Analysis → 1–26 August, granularity Daily, filtered to that server. This tells you what an Inaccessible database actually costs and settles the serverless question I couldn't answer from documentation.
+
+Then — the question that decides everything
+
+Contact the geospatial team (the arc11x naming and the OS dataset names point to ArcGIS 11.x). Ask one thing:
+
+"Six databases on (geo server name) have been unreachable since around 21 August due to a Key Vault access issue. Are they still needed?"
+
+Still needed → restore access, revalidate the key, then right-size normally.
+Not needed → delete, and the full amount goes immediately.
+
+Everything else in Finding 1 hangs on that answer, and it's not a decision you should make alone.
+
+Post this to the ticket now
+
+Don't wait until the investigation finishes. Verify the figures against your CSV first, then:
+
+Update — investigation in progress.
+
+Scope correction: SQL Database spend in C190VOA is ~£42.6K/month (the ~£164K subscription figure includes all services). Full per-database export attached.
+
+Finding 1 (open): six databases on (sql server name) are in Inaccessible state. Root cause appears to be the server's managed identity lacking access to Key Vault bst-iaz-kvt-dev-geo, which holds the customer-managed TDE protector. The key itself is healthy (expires 2028). Last server activity 21/08. July cost for these six was ~£2.2K; current billing while inaccessible being confirmed. Two further databases on other servers are also Inaccessible and being checked. This needs resolving as an availability issue before any cost decision, and requires confirmation from the geospatial team that the environment is still required.
+
+Scope note: the databases listed in this ticket are not the complete set. At least three high-cost databases are absent, including (datasyncdatabase) (~£11K in July, provisioned 80 vCores in DEV) which is the most expensive database in the subscription. Recommend working from the cost export rather than the tables in this ticket.
+
+Scope note: storage is billed on maximum configured size for General Purpose databases regardless of consumption (~£5.7K/month subscription-wide). This is outside the ticket's stated scope of vCores and DTUs, but carries no performance risk. Recommend adding it.
+
+
