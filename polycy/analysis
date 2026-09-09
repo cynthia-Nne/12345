@@ -1,0 +1,18 @@
+Hi Aravind,
+
+Thanks. I’ll hold the decommissioning pending your confirmation.
+
+Please see the details I have been able to validate:
+
+1. Environment: DEV –
+
+2. SID Name: Could you please clarify what you mean by SID in this context? These are Azure SQL databases, so I want to make sure I provide the specific identifier you require rather than assume.
+
+3. Schema Name: I’m unable to retrieve the schema at present because the database is currently Inaccessible. An attempt to connect through Query Editor returns an Azure Key Vault critical error, so I cannot query the database to confirm the schema.
+
+4. Since when the database was inactive: I reviewed the Successful Connections metric across approximately the last 90 days and found 0 successful connections during the periods reviewed. However, I cannot confirm the exact date the database originally became inactive from the available metrics, so I would not want to provide an unsupported date.
+
+I hope this helps. Please let me know what specific SID information you require and I can check accordingly.
+
+Kind regards,
+Cynthia
