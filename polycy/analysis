@@ -1,20 +1,188 @@
-Hi Aravind,
+# ============================================================
+# Get Local User IDs / Accounts from Azure Windows VMs
+# ============================================================
+# Purpose:
+#   Takes a list of Azure VMs and retrieves local users
+#   configured on each VM.
+#
+# Requirements:
+#   - Az PowerShell module installed
+#   - User running the script must already have appropriate
+#     Azure permissions to invoke Run Command on the VMs
+#   - Windows Azure VMs
+#
+# No usernames/passwords are hard-coded.
+# ============================================================
 
-Thanks, that’s helpful. I’ll continue to hold the decommissioning until you’ve completed your checks.
+# Connect to Azure using the current user's credentials
+Connect-AzAccount
 
-One additional point I noticed while reviewing the environments may help with the decision. The same six database names appear across three SQL servers/environments:
+# ------------------------------------------------------------
+# INPUT
+# ------------------------------------------------------------
 
-sql-
-sql
-sql
+# Add VM names and Resource Groups here.
+# You can add around 10-15 VMs per run.
+$VMList = @(
+    @{ VMName = "VM-NAME-01"; ResourceGroup = "RESOURCE-GROUP-01" },
+    @{ VMName = "VM-NAME-02"; ResourceGroup = "RESOURCE-GROUP-01" },
+    @{ VMName = "VM-NAME-03"; ResourceGroup = "RESOURCE-GROUP-02" }
+)
 
-The six databases on bst-iaz-sql-dev-geo are currently Online, and the same database names also exist on vos-iaz-sql-dev-geo (with five Online and OSMM currently Paused). The corresponding six databases on [datbasename] are currently Inaccessible.
+# Output file
+$OutputFile = ".\VM_User_Assignment_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 
-Given the context you’ve provided for SWEET and FMEShared, could you please confirm whether [databasename] is still required, or whether the active/current versions of these databases are now hosted on one of the other two servers?
+# Store results
+$Results = @()
 
-I’ve attached screenshots showing the database lists/status across the three servers for comparison.
+# ------------------------------------------------------------
+# PROCESS EACH VM
+# ------------------------------------------------------------
 
-Once you’ve completed the checks on the remaining databases, we can confirm what can safely be decommissioned.
+foreach ($VM in $VMList) {
 
-Kind regards,
-Cynthia
+    $VMName = $VM.VMName
+    $ResourceGroup = $VM.ResourceGroup
+
+    Write-Host ""
+    Write-Host "Processing $VMName in $ResourceGroup ..."
+
+    try {
+
+        # First confirm that the VM exists
+        $AzureVM = Get-AzVM `
+            -ResourceGroupName $ResourceGroup `
+            -Name $VMName `
+            -Status `
+            -ErrorAction Stop
+
+        $PowerState = (
+            $AzureVM.Statuses |
+            Where-Object { $_.Code -like "PowerState/*" }
+        ).DisplayStatus
+
+        # Run PowerShell inside the VM
+        $RunCommand = Invoke-AzVMRunCommand `
+            -ResourceGroupName $ResourceGroup `
+            -VMName $VMName `
+            -CommandId "RunPowerShellScript" `
+            -ScriptString @'
+
+$Output = @()
+
+# Retrieve local users
+$LocalUsers = Get-LocalUser -ErrorAction SilentlyContinue
+
+foreach ($User in $LocalUsers) {
+
+    # Identify groups associated with the local user
+    $Groups = @()
+
+    $LocalGroups = Get-LocalGroup -ErrorAction SilentlyContinue
+
+    foreach ($Group in $LocalGroups) {
+
+        try {
+
+            $Members = Get-LocalGroupMember `
+                -Group $Group.Name `
+                -ErrorAction SilentlyContinue
+
+            if ($Members.Name -contains "$env:COMPUTERNAME\$($User.Name)") {
+                $Groups += $Group.Name
+            }
+
+        }
+        catch {
+            # Continue if group cannot be read
+        }
+    }
+
+    $Output += [PSCustomObject]@{
+        ComputerName = $env:COMPUTERNAME
+        UserName     = $User.Name
+        Enabled      = $User.Enabled
+        SID          = $User.SID.Value
+        Groups       = ($Groups -join ";")
+        LastLogon    = $User.LastLogon
+    }
+}
+
+$Output | ConvertTo-Csv -NoTypeInformation
+
+'@
+
+        # Extract Run Command output
+        $RawOutput = $RunCommand.Value |
+            Where-Object { $_.Code -match "ComponentStatus/StdOut/succeeded" } |
+            Select-Object -ExpandProperty Message
+
+        if ([string]::IsNullOrWhiteSpace($RawOutput)) {
+
+            $Results += [PSCustomObject]@{
+                VMName        = $VMName
+                ResourceGroup = $ResourceGroup
+                PowerState    = $PowerState
+                UserName      = "No users returned"
+                SID           = ""
+                Groups        = ""
+                Enabled       = ""
+                LastLogon     = ""
+                Status        = "No data returned"
+            }
+
+            continue
+        }
+
+        # Convert returned CSV text to PowerShell objects
+        $UserData = $RawOutput | ConvertFrom-Csv
+
+        foreach ($User in $UserData) {
+
+            $Results += [PSCustomObject]@{
+                VMName        = $VMName
+                ResourceGroup = $ResourceGroup
+                PowerState    = $PowerState
+                UserName      = $User.UserName
+                SID           = $User.SID
+                Groups        = $User.Groups
+                Enabled       = $User.Enabled
+                LastLogon     = $User.LastLogon
+                Status        = "Success"
+            }
+        }
+    }
+
+    catch {
+
+        Write-Warning "Failed to process $VMName : $($_.Exception.Message)"
+
+        $Results += [PSCustomObject]@{
+            VMName        = $VMName
+            ResourceGroup = $ResourceGroup
+            PowerState    = "Unknown"
+            UserName      = ""
+            SID           = ""
+            Groups        = ""
+            Enabled       = ""
+            LastLogon     = ""
+            Status        = "Failed: $($_.Exception.Message)"
+        }
+    }
+}
+
+# ------------------------------------------------------------
+# OUTPUT
+# ------------------------------------------------------------
+
+$Results |
+    Export-Csv `
+        -Path $OutputFile `
+        -NoTypeInformation `
+        -Encoding UTF8
+
+Write-Host ""
+Write-Host "Completed."
+Write-Host "Results saved to: $OutputFile"
+
+$Results | Format-Table -AutoSize
