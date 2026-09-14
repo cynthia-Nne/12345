@@ -1,18 +1,16 @@
-# ============================================================
-# Get Local User IDs / Accounts from Azure Windows VMs
-# ============================================================
-# Purpose:
-#   Takes a list of Azure VMs and retrieves local users
-#   configured on each VM.
-#
-# Requirements:
-#   - Az PowerShell module installed
-#   - User running the script must already have appropriate
-#     Azure permissions to invoke Run Command on the VMs
-#   - Windows Azure VMs
-#
-# No usernames/passwords are hard-coded.
-# ============================================================
+<#
+    VM_Group_Membership.ps1
+
+    Reports LOCAL GROUP MEMBERSHIP for a list of Azure VMs, including domain
+    users and domain groups nested into local groups (e.g. Administrators).
+
+    Equivalent to opening lusrmgr.msc > Groups > Administrators > Properties
+    on each VM, but run remotely via Azure Run Command - no RDP required.
+
+    Uses the ADSI WinNT provider rather than Get-LocalGroupMember, because
+    Get-LocalGroupMember throws and drops the entire group when it meets a
+    member SID it cannot resolve (orphaned accounts, deleted domain objects).
+#>
 
 # Connect to Azure using the current user's credentials
 Connect-AzAccount
@@ -21,19 +19,143 @@ Connect-AzAccount
 # INPUT
 # ------------------------------------------------------------
 
-# Add VM names and Resource Groups here.
-# You can add around 10-15 VMs per run.
+# Add VM names and Resource Groups here. 10-15 VMs per run is comfortable.
 $VMList = @(
-    @{ VMName = "VM-NAME-01"; ResourceGroup = "RESOURCE-GROUP-01" },
-    @{ VMName = "VM-NAME-02"; ResourceGroup = "RESOURCE-GROUP-01" },
-    @{ VMName = "VM-NAME-03"; ResourceGroup = "RESOURCE-GROUP-02" }
+    @{ VMName = "C190VOADEV238"; ResourceGroup = "C190VOArgpBSTDeveloper" },
+    @{ VMName = "C190VOADEV239"; ResourceGroup = "C190VOArgpBSTDeveloper" },
+    @{ VMName = "C190VOADEV240"; ResourceGroup = "C190VOArgpBSTDeveloper" }
 )
 
+# Which local groups to report on.
+# Keep this short - Run Command truncates stdout, so asking for every group
+# on every VM will silently lose rows. Set to @() for all groups.
+$GroupFilter = @("Administrators", "Remote Desktop Users")
+
 # Output file
-$OutputFile = ".\VM_User_Assignment_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+$OutputFile = ".\VM_Group_Membership_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
 
 # Store results
 $Results = @()
+
+# ------------------------------------------------------------
+# SCRIPT THAT RUNS INSIDE EACH VM
+# ------------------------------------------------------------
+# Single-quoted here-string: nothing in here is expanded locally.
+# __GROUPFILTER__ is substituted just before the call.
+
+$InnerScriptTemplate = @'
+$ErrorActionPreference = "Continue"
+
+$Filter = @(__GROUPFILTER__)
+$Rows   = @()
+
+# Cache local users so we can add Enabled / LastLogon for local members
+$LocalUsers = @{}
+Get-LocalUser -ErrorAction SilentlyContinue | ForEach-Object { $LocalUsers[$_.Name] = $_ }
+
+# Win32_Group gives us a clean, reliable list of local group names
+$Groups = Get-CimInstance -ClassName Win32_Group -Filter "LocalAccount = True" -ErrorAction SilentlyContinue
+
+foreach ($Group in $Groups) {
+
+    $GroupName = $Group.Name
+
+    if ($Filter.Count -gt 0 -and $Filter -notcontains $GroupName) { continue }
+
+    # Bind to the group through the WinNT provider - this is what lusrmgr uses
+    $Members = @()
+    try {
+        $AdsiGroup = [ADSI]"WinNT://./$GroupName,group"
+        $Members   = @($AdsiGroup.psbase.Invoke("Members"))
+    }
+    catch {
+        $Rows += [PSCustomObject]@{
+            GroupName  = $GroupName
+            MemberName = "(group could not be read)"
+            MemberType = ""
+            Scope      = ""
+            SID        = ""
+            Enabled    = ""
+            LastLogon  = ""
+        }
+        continue
+    }
+
+    if ($Members.Count -eq 0) {
+        $Rows += [PSCustomObject]@{
+            GroupName  = $GroupName
+            MemberName = "(no members)"
+            MemberType = ""
+            Scope      = ""
+            SID        = ""
+            Enabled    = ""
+            LastLogon  = ""
+        }
+        continue
+    }
+
+    foreach ($Member in $Members) {
+
+        $Name      = ""
+        $Class     = ""
+        $Authority = ""
+        $Sid       = ""
+
+        try {
+            $Name    = $Member.GetType().InvokeMember("Name",   "GetProperty", $null, $Member, $null)
+            $Class   = $Member.GetType().InvokeMember("Class",  "GetProperty", $null, $Member, $null)
+            $AdsPath = $Member.GetType().InvokeMember("AdsPath","GetProperty", $null, $Member, $null)
+
+            # AdsPath looks like WinNT://USERDOMAIN01/7925990
+            #                 or WinNT://MACHINENAME/BSTAdmin
+            $Parts = ($AdsPath -replace "^WinNT://", "") -split "/"
+            if ($Parts.Count -ge 2) { $Authority = $Parts[$Parts.Count - 2] }
+        }
+        catch { }
+
+        # SID comes straight off the member object, so it still resolves
+        # even when the name cannot be looked up against a DC
+        try {
+            $SidBytes = $Member.GetType().InvokeMember("objectSid", "GetProperty", $null, $Member, $null)
+            $Sid = (New-Object System.Security.Principal.SecurityIdentifier($SidBytes, 0)).Value
+        }
+        catch { }
+
+        if ([string]::IsNullOrWhiteSpace($Name)) { $Name = "(unresolved SID)" }
+
+        if ($Authority -eq $env:COMPUTERNAME -or [string]::IsNullOrWhiteSpace($Authority)) {
+            $Scope      = "Local"
+            $MemberName = $Name
+        }
+        else {
+            $Scope      = "Domain"
+            $MemberName = "$Authority\$Name"
+        }
+
+        $Enabled   = ""
+        $LastLogon = ""
+        if ($Scope -eq "Local" -and $LocalUsers.ContainsKey($Name)) {
+            $Enabled   = $LocalUsers[$Name].Enabled
+            $LastLogon = $LocalUsers[$Name].LastLogon
+        }
+
+        $Rows += [PSCustomObject]@{
+            GroupName  = $GroupName
+            MemberName = $MemberName
+            MemberType = $Class
+            Scope      = $Scope
+            SID        = $Sid
+            Enabled    = $Enabled
+            LastLogon  = $LastLogon
+        }
+    }
+}
+
+$Rows | ConvertTo-Csv -NoTypeInformation
+'@
+
+$GroupFilterLiteral = ($GroupFilter | ForEach-Object { '"' + $_ + '"' }) -join ","
+$InnerScript = $InnerScriptTemplate.Replace("__GROUPFILTER__", $GroupFilterLiteral)
 
 # ------------------------------------------------------------
 # PROCESS EACH VM
@@ -41,7 +163,7 @@ $Results = @()
 
 foreach ($VM in $VMList) {
 
-    $VMName = $VM.VMName
+    $VMName        = $VM.VMName
     $ResourceGroup = $VM.ResourceGroup
 
     Write-Host ""
@@ -49,7 +171,7 @@ foreach ($VM in $VMList) {
 
     try {
 
-        # First confirm that the VM exists
+        # First confirm that the VM exists and is running
         $AzureVM = Get-AzVM `
             -ResourceGroupName $ResourceGroup `
             -Name $VMName `
@@ -61,56 +183,30 @@ foreach ($VM in $VMList) {
             Where-Object { $_.Code -like "PowerState/*" }
         ).DisplayStatus
 
+        if ($PowerState -ne "VM running") {
+            $Results += [PSCustomObject]@{
+                VMName     = $VMName
+                ResourceGroup = $ResourceGroup
+                PowerState = $PowerState
+                GroupName  = ""
+                MemberName = ""
+                MemberType = ""
+                Scope      = ""
+                SID        = ""
+                Enabled    = ""
+                LastLogon  = ""
+                Status     = "Skipped - VM not running"
+            }
+            continue
+        }
+
         # Run PowerShell inside the VM
         $RunCommand = Invoke-AzVMRunCommand `
             -ResourceGroupName $ResourceGroup `
             -VMName $VMName `
             -CommandId "RunPowerShellScript" `
-            -ScriptString @'
-
-$Output = @()
-
-# Retrieve local users
-$LocalUsers = Get-LocalUser -ErrorAction SilentlyContinue
-
-foreach ($User in $LocalUsers) {
-
-    # Identify groups associated with the local user
-    $Groups = @()
-
-    $LocalGroups = Get-LocalGroup -ErrorAction SilentlyContinue
-
-    foreach ($Group in $LocalGroups) {
-
-        try {
-
-            $Members = Get-LocalGroupMember `
-                -Group $Group.Name `
-                -ErrorAction SilentlyContinue
-
-            if ($Members.Name -contains "$env:COMPUTERNAME\$($User.Name)") {
-                $Groups += $Group.Name
-            }
-
-        }
-        catch {
-            # Continue if group cannot be read
-        }
-    }
-
-    $Output += [PSCustomObject]@{
-        ComputerName = $env:COMPUTERNAME
-        UserName     = $User.Name
-        Enabled      = $User.Enabled
-        SID          = $User.SID.Value
-        Groups       = ($Groups -join ";")
-        LastLogon    = $User.LastLogon
-    }
-}
-
-$Output | ConvertTo-Csv -NoTypeInformation
-
-'@
+            -ScriptString $InnerScript `
+            -ErrorAction Stop
 
         # Extract Run Command output
         $RawOutput = $RunCommand.Value |
@@ -118,41 +214,41 @@ $Output | ConvertTo-Csv -NoTypeInformation
             Select-Object -ExpandProperty Message
 
         if ([string]::IsNullOrWhiteSpace($RawOutput)) {
-
             $Results += [PSCustomObject]@{
-                VMName        = $VMName
+                VMName     = $VMName
                 ResourceGroup = $ResourceGroup
-                PowerState    = $PowerState
-                UserName      = "No users returned"
-                SID           = ""
-                Groups        = ""
-                Enabled       = ""
-                LastLogon     = ""
-                Status        = "No data returned"
+                PowerState = $PowerState
+                GroupName  = ""
+                MemberName = "No data returned"
+                MemberType = ""
+                Scope      = ""
+                SID        = ""
+                Enabled    = ""
+                LastLogon  = ""
+                Status     = "No data returned"
             }
-
             continue
         }
 
         # Convert returned CSV text to PowerShell objects
-        $UserData = $RawOutput | ConvertFrom-Csv
+        $MemberData = $RawOutput | ConvertFrom-Csv
 
-        foreach ($User in $UserData) {
-
+        foreach ($Row in $MemberData) {
             $Results += [PSCustomObject]@{
                 VMName        = $VMName
                 ResourceGroup = $ResourceGroup
                 PowerState    = $PowerState
-                UserName      = $User.UserName
-                SID           = $User.SID
-                Groups        = $User.Groups
-                Enabled       = $User.Enabled
-                LastLogon     = $User.LastLogon
+                GroupName     = $Row.GroupName
+                MemberName    = $Row.MemberName
+                MemberType    = $Row.MemberType
+                Scope         = $Row.Scope
+                SID           = $Row.SID
+                Enabled       = $Row.Enabled
+                LastLogon     = $Row.LastLogon
                 Status        = "Success"
             }
         }
     }
-
     catch {
 
         Write-Warning "Failed to process $VMName : $($_.Exception.Message)"
@@ -161,9 +257,11 @@ $Output | ConvertTo-Csv -NoTypeInformation
             VMName        = $VMName
             ResourceGroup = $ResourceGroup
             PowerState    = "Unknown"
-            UserName      = ""
+            GroupName     = ""
+            MemberName    = ""
+            MemberType    = ""
+            Scope         = ""
             SID           = ""
-            Groups        = ""
             Enabled       = ""
             LastLogon     = ""
             Status        = "Failed: $($_.Exception.Message)"
@@ -175,14 +273,21 @@ $Output | ConvertTo-Csv -NoTypeInformation
 # OUTPUT
 # ------------------------------------------------------------
 
-$Results |
-    Export-Csv `
-        -Path $OutputFile `
-        -NoTypeInformation `
-        -Encoding UTF8
-
 Write-Host ""
 Write-Host "Completed."
-Write-Host "Results saved to: $OutputFile"
 
-$Results | Format-Table -AutoSize
+$Results |
+    Sort-Object VMName, GroupName, Scope, MemberName |
+    Format-Table `
+        VMName,
+        GroupName,
+        MemberName,
+        MemberType,
+        Scope,
+        Enabled,
+        LastLogon,
+        Status -AutoSize
+
+$Results | Export-Csv -Path $OutputFile -NoTypeInformation
+Write-Host ""
+Write-Host "CSV written to $OutputFile"
