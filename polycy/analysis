@@ -1,293 +1,654 @@
-<#
-    VM_Group_Membership.ps1
 
-    Reports LOCAL GROUP MEMBERSHIP for a list of Azure VMs, including domain
-    users and domain groups nested into local groups (e.g. Administrators).
 
-    Equivalent to opening lusrmgr.msc > Groups > Administrators > Properties
-    on each VM, but run remotely via Azure Run Command - no RDP required.
+Bst 167985 full analysis and recommendations · MD
+BST-167985 — SQL Cost Optimisation, C190VOA
+Detailed analysis, findings, recommendations and best practice
+Author: Cynthia Ani Working draft: 21 September 2026 Data basis: SQL Cost Saving.xlsx — Sheet1 (cost by meter), Sheet3 (Resource Graph configuration), Sheet4 (storage metrics), Sheet5 (analysis)
 
-    Uses the ADSI WinNT provider rather than Get-LocalGroupMember, because
-    Get-LocalGroupMember throws and drops the entire group when it meets a
-    member SID it cannot resolve (orphaned accounts, deleted domain objects).
-#>
+How to use this document
+Work through it in order. Each part builds on the one before.
 
-# Connect to Azure using the current user's credentials
-Connect-AzAccount
+Part	What it does	Do before moving on
+1	Corrects the analysis sheet	Mandatory — every later number depends on it
+2	Confirms what the data covers	Confirm the billing period
+3	Describes the estate	Read only
+4	The findings, one at a time	Verify each figure against the corrected sheet
+5	Blockers to check before any change	Answer for each database you intend to change
+6	Savings summary	Fill in once Part 4 is verified
+7	Implementation roadmap	Agree sequencing with the owning teams
+8	Best practice going forward	Recommend alongside the findings
+Appendix	Formulas, queries, commands	Reference
+⚠️ Figure status. Figures in this document were read from screenshots of Sheet5 and are indicative until re-derived from the corrected workbook. Where a figure could be cross-checked against an independent source (the Cost Management portal), that is stated. Nothing should be quoted to stakeholders until Part 1 is complete and the figure has been confirmed in Excel.
 
-# ------------------------------------------------------------
-# INPUT
-# ------------------------------------------------------------
+PART 1 — Correct the analysis sheet first
+Three defects were found in Sheet5. Two of them inflate costs. None are visible from glancing at the sheet — they only show up when individual rows are cross-checked against the portal.
 
-# Add VM names and Resource Groups here. 10-15 VMs per run is comfortable.
-$VMList = @(
-    @{ VMName = "C190VOADEV238"; ResourceGroup = "C190VOArgpBSTDeveloper" },
-    @{ VMName = "C190VOADEV239"; ResourceGroup = "C190VOArgpBSTDeveloper" },
-    @{ VMName = "C190VOADEV240"; ResourceGroup = "C190VOArgpBSTDeveloper" }
+1.1 Licence cost is being counted twice ❗ Critical
+What is happening. In Sheet1, the SQL licence charge appears with ServiceTier SQL DB Single/Elastic Pool GP-SQL Licen and Meter vCore. The compute formula (column W) matches any Meter containing vCore, so it picks up the licence line. The licence formula (column Y) then picks it up again by ServiceTier. Every LicenseIncluded database is overstated by exactly its licence cost.
+
+Evidence — three independent cross-checks against the portal:
+
+Database	Sheet5 total (AB)	Licence (Y)	AB − Y	Portal figure	Match
+vos-iaz-sql-dev-datasyncs / vosiazsqldbdevndrdatasyncR2	£14,752.31	£3,766.98	£10,985.33	£10,985.33	✅
+ctp-iaz-sql-sit-revaluation / ctpiazsqldbsitrevaluation	£847.05	£188.35	£658.70	£658.70	✅
+ctp-iaz-sql-dev-revaluation / ctpiazsqldbdevrevaluation	£479.12	£94.17	£384.94	£384.94	✅
+In all three cases, removing the licence figure once lands exactly on the portal total. The defect is confirmed.
+
+Impact. Your single largest finding currently shows as £177,027 per year. The true figure is ~£131,824 per year. Presenting the inflated figure would be discovered on the first cross-check and would undermine every other number in the report.
+
+1.2 A second, smaller double-count on backups
+Some backup meters are named Backup - LRS Data Stored. That text contains both Data Stored (matched by the storage formula) and Backup (matched by the backup formula). Those rows are counted twice.
+
+This is small in value — for example about £26 on bstiazsqldbsitdap — but it is the same class of error and is fixed by the same change.
+
+1.3 The fix — classify each cost row exactly once
+Rather than patching the SUMIFS filters, classify every row of Sheet1 into one category. Each row then gets counted in exactly one place, and double-counting becomes impossible.
+
+Step 1. In Sheet1, insert a new column (K), header category, and in K2:
+
+=IF(ISNUMBER(SEARCH("Defender",E2)),"Defender",
+ IF(ISNUMBER(SEARCH("Licen",F2)),"Licence",
+ IF(OR(ISNUMBER(SEARCH("Backup",F2)),ISNUMBER(SEARCH("Backup",G2))),"Backup",
+ IF(ISNUMBER(SEARCH("Data Stored",G2)),"Storage",
+ IF(OR(ISNUMBER(SEARCH("vCore",G2)),ISNUMBER(SEARCH("DTU",G2))),"Compute","Other")))))
+The order of the tests matters. Licence is tested before Compute because the licence meter is named vCore. Backup is tested before Storage because backup meters contain Data Stored.
+
+Assumes Sheet1 columns: E = ServiceName, F = ServiceTier, G = Meter, H = Cost (GBP), J = MatchKey. Adjust if yours differ.
+
+Fill down, then convert column K to values (copy → paste special → values) to keep the workbook responsive.
+
+Step 2. Replace Sheet5 columns W–AA:
+
+Col	Header	Formula (row 2)
+W	computeCost	=SUMIFS(Sheet1!$H:$H,Sheet1!$J:$J,$A2,Sheet1!$K:$K,"Compute")
+X	storageCost	=SUMIFS(Sheet1!$H:$H,Sheet1!$J:$J,$A2,Sheet1!$K:$K,"Storage")
+Y	licenceCost	=SUMIFS(Sheet1!$H:$H,Sheet1!$J:$J,$A2,Sheet1!$K:$K,"Licence")
+Z	backupCost	=SUMIFS(Sheet1!$H:$H,Sheet1!$J:$J,$A2,Sheet1!$K:$K,"Backup")
+AA	otherCost	=SUMIFS(Sheet1!$H:$H,Sheet1!$J:$J,$A2,Sheet1!$K:$K,"Other")
+AB	totalCost	=SUM($W2:$AA2)
+AC	annualised	=$AB2*12
+AD	checkTotal	=SUMIFS(Sheet1!$H:$H,Sheet1!$J:$J,$A2)
+AE	reconciles?	=IF(ABS($AB2-$AD2)<0.01,"OK","MISMATCH")
+Filter AE for MISMATCH. There should be none. If there are, a row in Sheet1 has fallen outside the categories — inspect it.
+
+Why Defender is now removed from the per-database view. Defender for SQL is billed at server level. Server-level charges have a blank MatchKey, so they never match a database row. Your current defenderCost column shows £0 for every database — not because Defender is free, but because it cannot be attributed this way. Total it separately (Finding 11).
+
+1.4 Hyperscale maximum size produces nonsense values
+For the three Hyperscale databases, Resource Graph returns maxSizeBytes = -1 meaning "not applicable". The current formula divides it anyway, producing -9.31323E-10 in column R, and from there huge negative figures in U and V (for example −1,724.38 GB reclaimable and a percentage in the trillions).
+
+Fix — column R:
+
+=IF($A2="","",IF(Sheet3!J2<=0,"",Sheet3!J2/1073741824))
+This was an error in the formula I originally supplied. Hyperscale is billed on allocated storage, not maximum, so a blank is correct here.
+
+1.5 Missing storage metrics are being read as zero
+When a database has no metric data — Inaccessible, or paused for the whole sampling window — Sheet4 has a blank cell. VLOOKUP returns a blank as 0. The sheet then treats "we don't know" as "zero GB allocated", and column V reports the entire maximum size as reclaimable.
+
+Example: bstdevmigration shows 3,274 GB reclaimable. That figure is not real — we simply have no allocation data for it.
+
+Fix — columns S, T, U, V:
+
+Col	Formula
+S usedGB	=IFERROR(IF(INDEX(Sheet4!$D:$D,MATCH($A2,Sheet4!$C:$C,0))="","",INDEX(Sheet4!$D:$D,MATCH($A2,Sheet4!$C:$C,0))),"")
+T allocatedGB	=IFERROR(IF(INDEX(Sheet4!$E:$E,MATCH($A2,Sheet4!$C:$C,0))="","",INDEX(Sheet4!$E:$E,MATCH($A2,Sheet4!$C:$C,0))),"")
+U usedPctOfMax	=IF(OR($R2="",$S2=""),"",$S2/$R2)
+V reclaimableGB	=IF(OR($R2="",$T2=""),"",$R2-$T2)
+After this, blanks mean "unknown" and zeros mean zero. Treat every blank in V as needs measuring, not as a saving.
+
+1.6 Reconcile against the whole
+Once 1.3–1.5 are done, confirm the sheet accounts for all SQL database spend.
+
+In any spare cell:
+
+Attributed to databases:   =SUM(Sheet5!AB2:AB97)
+Total SQL in Sheet1:       =SUMIFS(Sheet1!H:H, Sheet1!E:E, "SQL Database")
+Unattributed:              = difference of the two
+The unattributed remainder is expected to be small and should consist of server-level charges (long-term retention backups on servers, including droppedserver) and any database that existed during the month but has since been deleted. If it is large, investigate before continuing — it means databases are missing from Sheet3.
+
+PART 2 — What the data covers
+2.1 Sources
+Sheet	Contents	Source	Rows
+Sheet1	Cost per resource per meter	Cost Management export	per meter, per resource
+Sheet3	Configuration per database	Azure Resource Graph	96 databases
+Sheet4	Used and allocated storage	Azure Monitor metrics, 7-day maximum	151+ (see 2.3)
+Sheet5	Joined analysis	Formulas over 1, 3, 4	96 databases
+2.2 ⚠️ Confirm the billing period
+The analysis assumes Sheet1 represents one complete calendar month. The evidence points to July 2026: vos-iaz-sql-dev-arc11x-geo / OSAddressBase shows £1,051.74 in Sheet5, which is exactly the portal's July figure for that database.
+
+Confirm this before quoting any monthly or annualised figure. If Sheet1 turns out to cover a different or partial period, every "per month" figure changes.
+
+2.3 Sheet4 covers more than C190VOA
+The storage script queried every subscription visible to your account, so Sheet4 includes PRD, PPE, TRN, DR and NFT databases outside this ticket's scope. This is harmless — Sheet5 only looks up the 96 C190VOA databases — but Sheet4 must never be totalled, and nothing in it should inform a recommendation about production.
+
+2.4 Derived unit rates (from your own data)
+These rates are calculated from the Sheet1 figures and are consistent across many rows. They let storage and DTU savings be calculated rather than estimated.
+
+Item	Rate	Evidence
+General Purpose storage	£0.1095 per GB per month, billed on maximum size	1,280 GB → £140.20; 3,274 GB → £358.59; 320 GB → £35.05; 32 GB → £3.50
+Standard (DTU) compute	~£1.18 per DTU per month, flat	S7 800 → £947.71; S6 400 → £473.86; S3 100 → £118.15; S2 50 → £59.08
+Standard (DTU) extra storage	~£0.134 per GB per month above the 250 GB included	1,024 GB max → £104.03 (774 GB above allowance)
+Serverless compute is not given a unit rate here. Billing depends on per-second consumption and a memory component, so no single rate fits the data, and inventing one would be misleading.
+
+PART 3 — The estate at a glance
+Build this summary from Sheet5 with a pivot table (Rows: computeModel; Values: count of database, sum of totalCost). Once Part 1 is corrected, fill in the figures:
+
+Compute model	Databases	Monthly cost	Can pause?
+Provisioned — billed 24/7			❌ Never
+DTU — flat rate			❌ Never
+Hyperscale	3	~£4,900	❌ Not supported
+Serverless			✅ If configured
+Total	96		
+Why this table matters. It divides the estate into databases whose cost is structural (Provisioned, DTU, Hyperscale — no setting can make them cheaper when idle) and databases whose cost is configurational (Serverless — the settings decide the bill). These need entirely different remedies, and presenting them together obscures that.
+
+Also build a second pivot by environment — it shows how much non-production spend sits in each tier of the delivery pipeline, which is useful context for the ticket.
+
+PART 4 — Findings
+Each finding follows the same structure: what was observed, why it costs money, the recommendation, the saving, the risk, and the steps.
+
+Findings are ordered by how they should be tackled, not by size.
+
+FINDING 1 — Inaccessible databases (CT-owned) — RAISED
+Status: Documented, raised with the CT team as [TICKET-KEY]. Decommission of the arc11x environment agreed with Chetan Naik (CT) on 27/08/2026, target 7 September, pending approval from Arvind.
+
+Scope	Databases	Monthly cost
+vos-iaz-sql-dev-arc11x-geo	6	£2,233.36
+geoedserver	1	£109.53
+bsttestserver	1	£3.95
+Total	8	£2,346.83
+⚠️ Action for today. The 7 September target date has passed. Sheet3 was exported in late August, so it cannot show whether the decommission happened. Check the current status of vos-iaz-sql-dev-arc11x-geo in the portal. If the databases still exist, they are still billing, and the CT ticket needs chasing.
+
+Saving: £2,233/month (~£26,800/year) on arc11x decommission — confirmed once executed. The remaining two databases depend on the CT team's investigation.
+
+No further analysis required on this ticket. Reference it in the summary.
+
+FINDING 2 — Azure Hybrid Benefit not applied (licence cost)
+Priority: 1 — do first. No performance impact, no owner negotiation, no testing.
+
+What was observed
+Filter Sheet5 column M (licenseType) for LicenseIncluded. Every one of these databases pays Microsoft for a SQL Server licence as a separate charge (column Y).
+
+Visible from the screenshots:
+
+Database	Environment	Licence cost/month
+vos-iaz-sql-dev-datasyncs / vosiazsqldbdevndrdatasyncR2	DEV	£3,766.98
+ctp-iaz-sql-sit-revaluation / ctpiazsqldbsitrevaluation	SIT	£188.35
+ctp-iaz-sql-dev-revaluation / ctpiazsqldbdevrevaluation	DEV	£94.17
+bstdevserver / fmeserver	DEV	£94.17
+bst-iaz-sql-tst-geo / SWEET	TST	£94.17
+vos-iaz-sql-sit-geo / SWEET	SIT	£94.17
+(others — sum column Y for the full list)		
+Why it costs money
+Azure Hybrid Benefit allows an organisation that already owns SQL Server licences with active Software Assurance to apply them to Azure SQL, removing the licence charge entirely. The database, its performance and its configuration are unchanged — only the billing changes.
+
+Note that Hybrid Benefit applies to Provisioned vCore databases. It does not apply to Serverless (whose licence is bundled into the per-second price) or to DTU tiers. That is why only a handful of databases carry this charge.
+
+Recommendation
+Confirm with the HMRC licensing or commercial contact whether eligible SQL Server licences with Software Assurance exist and can be allocated to non-production Azure use.
+If yes, apply Hybrid Benefit to each LicenseIncluded database.
+If the databases are deployed by Bicep, set licenseType: 'BasePrice' in the template rather than changing it in the portal.
+Saving
+Sum of column Y after the Part 1 fix. vosiazsqldbdevndrdatasyncR2 alone accounts for £3,766.98/month (~£45,200/year).
+
+Confidence: High if eligible licences exist. Zero technical risk.
+
+Steps
+az sql db update -g <resource-group> -s <server> -n <database> \
+  --license-type BasePrice
+Or portal: database → Compute + storage → Save money → Yes, I have a SQL Server licence → Apply.
+
+⚠️ Do not apply Hybrid Benefit without written licensing confirmation. Declaring licences you don't hold is a compliance issue, not just a cost one.
+
+FINDING 3 — Provisioned 80 vCores in DEV (single largest item)
+Priority: 2. Largest single saving in the subscription. The ndr naming indicates NDR scope — confirm, since that would make this directly actionable by your team.
+
+What was observed
+Attribute	Value
+Database	vos-iaz-sql-dev-datasyncs / vosiazsqldbdevndrdatasyncR2
+Environment	DEV
+SKU	GP_Gen5 — Provisioned (no _S_)
+Capacity	80 vCores
+Auto-pause	Not available (Provisioned)
+Licence	LicenseIncluded
+Backup redundancy	Geo
+Created	25/01/2026
+Max size	500 GB
+Monthly cost (corrected)	£10,985.33 — compute £7,164, licence £3,767, storage £55
+Annualised	~£131,800
+This one database represents roughly a quarter of all SQL spend in the subscription.
+
+Why it costs money
+A Provisioned database bills for its full vCore allocation every hour of every day, regardless of use. It cannot auto-pause — that capability only exists in Serverless. Eighty vCores is a very large allocation for any environment and exceptional for development.
+
+It sits alongside a sibling, vosiazsqldbdevndrdatasync (no R2), which is Serverless and costs £696.29/month. The R2 suffix and the more recent creation date suggest a second copy or re-platform attempt. Establish why both exist.
+
+Recommendation
+Three independent levers, which can be combined:
+
+Lever	Change	Monthly saving	Risk
+A. Hybrid Benefit	Licence → BasePrice	£3,767	None (Finding 2)
+B. Reduce vCores	80 → 16 provisioned	~£5,730 (illustrative)	Medium — test workload
+C. Convert to Serverless	GP_Gen5 → GP_S_Gen5, min 0.5, auto-pause 60	Up to ~£7,000+ (illustrative)	Medium — cold start
+Lever B is shown at 16 vCores to illustrate scale. Provisioned compute scales roughly linearly, so 16/80 of £7,164 is ~£1,433, saving ~£5,730. The correct target must come from actual CPU utilisation, not from this illustration.
+
+Lever C is likely the best fit for a development workload that isn't used around the clock, but a Serverless database that never pauses can cost more than Provisioned. It is only the right choice if usage is intermittent.
+
+Before changing anything
+Pull 30 days of metrics — cpu_percent (Average and Maximum) and connection_successful.
+Establish why R2 exists alongside the Serverless sibling. If R2 is a superseded copy, the answer may be deletion rather than right-sizing.
+Check whether it is covered by a reservation (Part 5).
+Check whether it is deployed by Bicep (Part 5).
+Confirm ownership.
+Saving
+Lever A alone: £3,767/month, certain if licences exist. Levers A + B or A + C: roughly £9,000–£10,000/month, to be confirmed by utilisation data. If deleted as superseded: £10,985/month.
+
+FINDING 4 — High minimum vCore floors on Serverless databases
+Priority: 3. Settings change only. No migration, no data movement. Likely a template-level pattern — potentially fixable once, everywhere.
+
+What was observed
+A group of Serverless databases carry minCapacity of 10 or 20 vCores. A Serverless database bills at least its minimum every second it is online, whether or not it is doing work.
+
+Database	Env	Min	Max	Auto-pause	Monthly
+bstsitlaserver / bstsitlarep	SIT	20	40	180 min	£4,867.15
+vos-iaz-sql-dev-datamig / vosiazsqldbdevndrdatamig	DEV	10	80	60	£1,397.46
+bstdatadev / bstdevpoststaging	DEV	10	80	60	£816.81
+vos-iaz-sql-dev-datasyncs / vosiazsqldbdevndrdatasync	DEV	10	80	60	£696.29
+vos-iaz-sql-sit-datamig / vosiazsqldbsitndrdatamig	SIT	20	40	60	£922.84
+vos-iaz-sql-uat-datasyncs / vosiazsqldbuatndrdatasync	UAT	20	40	60	£792.35
+vos-iaz-sql-sit-datasyncs / vosiazsqldbsitndrdatasync	SIT	20	40	60	£690.67
+bstdatadev / bstdevmigration	DEV	10	80	120	£503.19
+vos-iaz-sql-uat-datamig / vosiazsqldbuatndrdatamig	UAT	20	40	60	£220.92
+vos-iaz-sql-mo-datamig / vosiazsqldbmondrdatamig	MO	20	40	60	£126.36
+The pattern
+Look at the ndr datasync and datamig databases across DEV, SIT, UAT and MO. They share near-identical settings — min 10 or 20, max 40 or 80, 60-minute delay. Identical configuration across environments almost always means the values are set in a shared template or parameter file.
+
+That is significant: if confirmed, correcting one Bicep parameter file fixes the whole family and prevents the problem recurring in new environments.
+
+Why it costs money — bstsitlarep as the worked example
+bstsitlarep costs £4,867/month, second only to Finding 3.
+
+Min 20 vCores means that for every hour it is online, it bills at least 20 vCores' worth, even at 0% CPU.
+Auto-pause delay of 180 minutes means it must receive zero activity for three unbroken hours before it pauses. Any monitoring agent, health probe, connection pool or scheduled job that touches it inside three hours resets the clock. In a working environment that gap rarely occurs, so in practice it seldom pauses.
+Storage: max 1,280 GB, but only 351 GB allocated and 38 GB used. 929 GB is paid for and empty.
+The two settings together mean the database has the price profile of a large Provisioned server while being configured as Serverless.
+
+Recommendation
+Setting	Current	Recommended starting point
+Min vCores	10–20	0.5
+Auto-pause delay	60–180 min	60 min
+Max vCores	40–80	Set from observed peak — typically 2× the 30-day maximum app_cpu_billed
+Max storage	1,280 GB (bstsitlarep)	~450 GB (allocated 351 + headroom)
+Saving
+Illustrative, pending utilisation data. The minimum floor is the controllable component. For bstsitlarep alone, reducing min from 20 to 0.5 removes almost the entire guaranteed floor, and a working 60-minute pause delay could cut compute by a large fraction if the environment is idle overnight and at weekends.
+
+A realistic conservative planning figure for the whole group is 30–50% of their combined compute cost, to be confirmed with app_cpu_billed data after a one-week trial on one database.
+
+Storage on bstsitlarep (calculated): 929 GB × £0.1095 = ~£102/month, with no performance impact.
+
+Risk
+Cold start. When a paused Serverless database receives a connection, it takes up to around a minute to resume, and the first connection may fail. Applications need retry logic. This is normally acceptable in DEV and SIT but must be confirmed with each owning team — particularly for anything with scheduled data syncs, where a failed first connection could break a job.
+
+Steps
+Pull 30 days of app_cpu_billed (Sum), app_cpu_percent (Avg and Max) and connection_successful for each database.
+Check the Bicep repository for where minCapacity and autoPauseDelay are set.
+Trial on one database first — bstsitlarep is the obvious candidate given its size. Change settings, monitor for one week, confirm no job failures.
+If successful, change the template and roll through environments in pipeline order.
+FINDING 5 — Hyperscale databases that cannot pause
+Priority: 4. Tier change with a migration. Higher effort.
+
+What was observed
+Database	Env	Min	Auto-pause	Used	Allocated	Monthly
+bst-iaz-sql-sit-dap / bstiazsqldbsitdap	SIT	5	−1	400 GB	827 GB	£2,173.55
+bst-iaz-sql-dap-dev / bstiazsqldbdapdev	DEV	5	−1	1,629 GB	1,724 GB	£1,473.40
+bst-iaz-sql-uat-dap / bstiazsqldbuatdap	UAT	5	−1	428 GB	895 GB	£1,272.40
+Total						~£4,919/month (~£59,000/year)
+⚠️ Correction to earlier analysis
+An earlier version of this analysis stated these databases were "essentially zero in size". That was wrong — it misread the -1 placeholder Hyperscale returns for maximum size. The storage metrics now show their real sizes: 400 GB to 1.7 TB.
+
+Why it costs money
+Hyperscale is designed for very large databases (up to 128 TB) and rapid scale-out. Its Serverless variant cannot auto-pause — that capability exists only in General Purpose. With a minimum of 5 vCores, each database bills at least 5 vCores continuously, forever.
+
+The key question — do these need Hyperscale?
+All three would fit within General Purpose limits (up to 4 TB). Hyperscale is justified only by size well beyond that, very high I/O throughput, or a genuine need for fast restores or read-scale replicas. At 400 GB–1.7 TB in non-production, none of those is evident from the data.
+
+Recommendation
+Confirm with the owning team (these are bst … dap — data analytics platform) why Hyperscale was chosen. There may be a performance reason not visible in configuration.
+If none: move to General Purpose Serverless, min 0.5, auto-pause 60.
+Constraint
+Azure supports reverse migration from Hyperscale to General Purpose only within 45 days of the original move to Hyperscale. These were created in mid-2024, so that window has long closed. Moving them requires copying the data into a new General Purpose database (export/import or a database copy) and repointing connections. Plan this as a proper migration, not a setting change.
+
+Saving
+Illustrative. Depends on how often the workload is idle. If the environments are unused overnight and at weekends, General Purpose Serverless with auto-pause could reduce compute substantially. Obtain 30 days of app_cpu_billed before committing to a figure.
+
+FINDING 6 — Duplicate geospatial reference datasets
+Priority: 5. Depends on the BST → VOS migration plan.
+
+What was observed
+The same Ordnance Survey reference datasets are held on multiple servers, several on the most expensive Standard tiers:
+
+Dataset	Copies	Tiers	Combined monthly
+OSAddressBase	5	3× S7 (800 DTU), 2× S6 (400 DTU)	~£4,311
+GeoLocators	3	S3 (100 DTU)	~£354
+FMEShared / SWEET	multiple	S2 (50 DTU) and GP	see sheet
+GeoCuratedData / OSMM	multiple	GP Serverless	see sheet
+OSAddressBase has 1,024 GB maximum on every copy, but uses only 70–160 GB.
+
+Context established with the CT team
+Chetan Naik (CT) confirmed on 27/08/2026 that the geo environment is mid-migration from BST to VOS, and that both bst-iaz-sql-dev-geo and vos-iaz-sql-dev-geo are in active use during the migration. The third copy (arc11x) is being decommissioned under Finding 1.
+
+This duplication is therefore partly expected — a source and a target running in parallel during migration. The cost question is about the end state, not the present.
+
+Recommendation — two horizons
+Now (while both are in use):
+
+Storage ceiling on OSAddressBase. Every copy is set to 1,024 GB but uses 70–160 GB. Standard tier includes 250 GB, so bringing the maximum down to 250 GB removes the ~£104/month extra-storage charge on each copy. However, allocated space is 291–643 GB on several copies, above 250 GB — so this requires shrinking the data files first. Treat as a planned piece of work, not a quick win.
+DTU right-sizing. Pull 30 days of dtu_consumption_percent. If average is consistently below 40%, drop one tier at a time (S7 → S6 → S4) and re-measure. Reference data that is mostly read may run comfortably on a much smaller tier. Each step down from S7 to S4 saves ~£710/month per copy.
+At migration completion:
+
+The bst-iaz-sql-dev-geo environment presumably retires. Its six databases currently cost ~£4,504/month (~£54,000/year).
+Recommend a decommission milestone is written into the migration plan now, with a named owner. Parallel-running environments are one of the most common ways cloud cost leaks — the migration finishes, and the source is quietly left running.
+Saving
+Now: storage ~£416/month (four copies, after file shrink) plus DTU right-sizing (illustrative, pending utilisation).
+At migration end: ~£4,504/month from retiring the BST side — dependent on the migration plan, not on this ticket.
+FINDING 7 — Databases whose names suggest temporary use
+Priority: 6. Slowest — requires owner sign-off for each.
+
+What was observed
+Database	Env	Created	Age	Monthly	Of which storage
+bstdatadev / bstdevpoststaging	DEV	Jan 2022	55 months	£816.81	£328.58
+bstdatadev / bstdevmigration	DEV	Dec 2021	57 months	£503.19	£358.59
+bstdevlaserver / bstdevlarep_Performance_Tunning	DEV	Sep 2025	12 months	£495.21	£431.37
+bstdevserver / bst-iaz-sqldb-dev-pvdb-datamodel-live-restore	DEV			£218.24	
+bst-iaz-sql-test-dm / bstiazsqlstagingdbtestdm	TEST			£121.88	
+vos-iaz-sql-mo-datasyncs / vosiazsqldbmondrdatasync_orig	MO	Sep 2025	12 months	£118.13	£35.05
+bstdevserver / dev_test	DEV			£59.08	
+bst-iaz-sql-test-dm / bstiazsqlpoststagingdbtestdm	TEST			see sheet	
+Total (visible rows)				~£2,333/month	
+Why it costs money
+Names like migration, poststaging, Performance_Tunning, live-restore, _orig and dev_test describe one-off activities. Two of these are more than four years old. The pattern is typical of cloud estates: a database is created for a task, the task finishes, and nobody deletes it.
+
+Paused does not mean free. Several of these show as Paused, yet carry significant compute cost — meaning they wake periodically. And storage bills 24 hours a day regardless of pause state.
+
+Recommendation
+For each database:
+
+Identify the owner (tags, resource group, or team knowledge).
+Ask one question: "Is this still needed, and if so, for what?"
+If not needed: take a final BACPAC export to a storage account if there is any chance the data is wanted, then delete.
+If needed: apply Finding 4 settings (min 0.5, delay 60) and reduce the storage ceiling.
+Saving
+Up to ~£2,333/month (~£28,000/year) if all are confirmed as no longer needed. Confirmed only on owner sign-off, one database at a time.
+
+FINDING 8 — Storage provisioned far beyond use
+Priority: 7. No performance impact. Modest value per database, but accumulates.
+
+What was observed
+General Purpose storage is billed on the maximum size set, not on data actually stored, at £0.1095 per GB per month (derived from your data, Part 2.4).
+
+After the Part 1 fixes, filter Sheet5 column V (reclaimableGB) for values above 100 and exclude blanks. The saving for each row is:
+
+reclaimableGB × £0.1095
+Examples from the data:
+
+Database	Max	Allocated	Used	Reclaimable	Monthly saving
+bstsitlarep	1,280 GB	351 GB	38 GB	929 GB	~£102
+bstdevserver / bstdevlarep	1,024 GB	19 GB	14 GB	1,005 GB	~£110
+a ctp revaluation database	1,024 GB	32 GB	27 GB	992 GB	~£109
+bst-iaz-sql-tst-geo / OSMM	2,000 GB	1,537 GB	1,390 GB	463 GB	~£51
+Important distinction
+Maximum − allocated can be reclaimed immediately by lowering the maximum. No data work needed.
+Allocated − used requires shrinking the data files first (DBCC SHRINKFILE), which is slower, can fragment indexes, and should be scheduled. Treat it as a separate, later task.
+Always leave headroom — set the new maximum at allocated plus 20–30%, never at allocated exactly, or the database will fill and stop accepting writes.
+
+Saving
+Sum across all qualifying rows once Part 1 is fixed. Individually small, but zero-risk and quick to implement.
+
+FINDING 9 — Auto-pause disabled on Serverless databases
+Priority: 8. Overlaps with Findings 4 and 6.
+
+What was observed
+Filter Sheet5 for computeModel = Serverless and autoPauseDelay = -1. Notable cases:
+
+Database	Env	Min	Monthly
+bst-iaz-sql-dev-geo / OSMM	DEV	4	£1,790.99
+bst-iaz-sql-dev-geo / GeoCuratedData	DEV	4	£1,425.23
+InRule databases (DEV, NPD, CI)	various	0.5	~£70–£210 each
+With auto-pause disabled, a Serverless database never pauses. It bills its minimum floor continuously — the worst of both models.
+
+⚠️ Caution
+The two largest (bst-iaz-sql-dev-geo OSMM and GeoCuratedData) belong to the environment the CT team confirmed is in active use for the BST → VOS migration. Do not recommend enabling auto-pause on these without the CT team's agreement — a cold start during a migration job could cause failures.
+
+Auto-pause is also blocked entirely by geo-replication, failover groups or long-term backup retention. Check before assuming it can be enabled.
+
+Saving
+Illustrative, pending utilisation data and owner agreement.
+
+FINDING 10 — Geo-redundant backups in non-production
+Priority: 9. Hygiene rather than saving.
+
+What was observed
+Many databases have backupRedundancy = Geo, meaning backups are replicated to a second Azure region. This protects against a regional outage — a reasonable choice for production, harder to justify for development and test.
+
+Honest assessment of value
+The backup cost column (Z) is close to zero for almost every database. Point-in-time restore backup storage is free up to the database's maximum size in the vCore model, and included in DTU pricing. The money involved is small.
+
+Recommendation
+Change non-production databases to Local redundancy as good practice, and set it as the default in templates. Present it as a policy alignment item, not a saving.
+
+Note: changing redundancy only affects backups taken afterwards.
+
+FINDING 11 — Defender for SQL on every non-production server
+Priority: 10. Security policy decision, not a cost decision.
+
+What was observed
+Microsoft Defender for SQL is billed per server per month (~£9.48 per server in the observed data). Because it is server-level, it does not appear in the per-database analysis.
+
+Total it directly from Sheet1:
+
+=SUMIFS(Sheet1!H:H, Sheet1!E:E, "*Defender*")
+Recommendation
+Raise with the security owner: is Defender for SQL required on every non-production server, or only those holding real or sensitive data?
+
+⚠️ This is not yours to decide. Present the cost and let security own the answer. Disabling a security control to save money, without that decision being made by the right people, is a poor trade.
+
+PART 5 — Before changing any database
+These checks are mandatory for every database you propose to change. They go in Sheet5 columns AJ–AP.
+
+5.1 Reservation check
+A reservation is a one- or three-year prepayment for a quantity of vCores. Your data includes a "Purchase" charge of ~£1,253 — evidence that at least one reservation exists.
+
+The risk: if you scale down a database whose capacity is covered by a reservation, the reservation keeps being paid but no longer has anything to apply to. The saving evaporates.
+
+Check: Portal → Reservations → review scope, size, family (Gen5 General Purpose), term and utilisation.
+
+5.2 Infrastructure-as-code check
+If a database is deployed by Bicep through Azure DevOps, a change made in the portal will be reverted on the next pipeline run.
+
+Check: search the repositories for the database name. If found, the change goes into the template or parameter file and through the pipeline — not the portal.
+
+This is especially relevant for Finding 4, where the uniform settings suggest a shared template.
+
+5.3 Ownership
+Every change needs a named owner's agreement, recorded in the ticket. Findings 1 and 6 are CT-owned. The ndr databases appear to be NDR-owned — confirm. The bst … dap databases belong to the data analytics platform team.
+
+5.4 Utilisation evidence
+For any compute change, have 30 days of metrics before and after:
+
+Model	Metrics
+vCore / Serverless	cpu_percent, app_cpu_billed, app_cpu_percent, app_memory_percent
+DTU	dtu_consumption_percent
+All	connection_successful
+Take both Average and Maximum. Average alone hides spikes; maximum alone hides how idle a database is.
+
+5.5 Change control
+Non-production changes still affect testers and pipelines. Follow the programme's change process and give the owning teams notice.
+
+PART 6 — Savings summary
+Fill this in after Part 1 is corrected and each finding has been verified.
+
+6.1 By confidence
+Tier	Meaning	Findings	Monthly	Annual
+A — Confirmed	Agreed or certain once executed	1 (arc11x)	£2,233	£26,800
+B — High confidence, no performance risk	Needs a licensing or owner decision only	2 (Hybrid Benefit), 8 (storage), 7 (deletions, on sign-off)	sum	sum
+C — Evidence required	Needs utilisation data and testing	3, 4, 5, 9	range	range
+D — Structural	Depends on another programme	6 (post-migration)	~£4,504	~£54,000
+Present these tiers separately. Do not add them into a single headline. A combined figure mixes certain savings with speculative ones, and a reviewer will discount the whole number to the level of its least certain part.
+
+6.2 Scale reference (monthly, from visible data, pre-correction where noted)
+Item	Monthly
+vosiazsqldbdevndrdatasyncR2 (corrected)	£10,985
+High-floor Serverless group (Finding 4)	~£11,000 combined
+Hyperscale × 3	~£4,919
+OSAddressBase × 5	~£4,311
+Temporary-named databases	~£2,333
+arc11x environment	£2,233
+PART 7 — Implementation roadmap
+Phase	Timing	Actions	Why this order
+0 — Correct	This week	Part 1 fixes, reconcile, confirm billing period	Nothing is reliable until done
+1 — No-risk	Weeks 1–2	Hybrid Benefit (on licensing confirmation); storage ceilings; arc11x decommission follow-up	No performance impact, no testing — builds credibility
+2 — Settings	Weeks 2–4	Trial Finding 4 on bstsitlarep; if clean, template change for the ndr family	Reversible, low risk, large value
+3 — Decisions	Weeks 2–6	Owner sign-off on Finding 7 deletions; R2 purpose (Finding 3)	Slow — start the conversations early
+4 — Tier changes	Month 2	R2 right-size or convert; DTU right-sizing on OSAddressBase	Needs utilisation data and testing
+5 — Migrations	Month 2–3	Hyperscale → General Purpose	Data movement required
+6 — Structural	With migration plan	BST geo decommission milestone	Owned by the migration programme
+Measure after every change. Re-run Cost Analysis one week and one month later. A saving that isn't measured afterwards can't be claimed.
+
+PART 8 — Best practice going forward
+These are the recommendations that stop the same waste recurring. They are arguably more valuable than the one-off savings.
+
+8.1 Standard configuration for non-production
+Set these as template defaults, so every new database starts cheap and has to justify being expensive:
+
+Setting	Non-prod default
+Compute model	General Purpose Serverless
+Min vCores	0.5
+Auto-pause	Enabled, 60 minutes
+Max vCores	Sized to workload, not maximum available
+Backup redundancy	Local
+Max storage	Expected size + 30%, reviewed quarterly
+Licence	BasePrice where Hybrid Benefit is available
+Provisioned, Hyperscale and DTU tiers should require a written justification.
+
+8.2 Enforce through Azure Policy
+Configuration drifts unless it's enforced. Azure Policy can:
+
+Audit Serverless databases with auto-pause disabled
+Audit non-production databases using Hyperscale or Provisioned tiers
+Audit geo-redundant backups outside production
+Require owner and expiry tags on every database
+Start with Audit effect, not Deny — let teams see the gap before blocking deployments.
+
+8.3 Mandatory tagging
+Require on every SQL database:
+
+Tag	Purpose
+owner	Who to ask
+environment	Stops guessing from names
+purpose	What it's for
+expiry	When it should be reviewed or removed
+The Finding 7 databases would have been flagged automatically years ago with an expiry tag.
+
+8.4 Budgets and alerts
+Create a Cost Management budget on the C190VOA subscription with alerts at 80%, 100% and 120%. The subscription currently shows Budget: None.
+
+Also recommend anomaly alerts — Cost Management flagged a "daily run rate 115%" insight during this analysis that went unnoticed.
+
+8.5 Health alerting
+Eight databases sat Inaccessible and undetected (Finding 1). Alert on:
+
+SQL database state changing to Inaccessible
+Key Vault Unauthorized / Forbidden key operations for any vault holding a TDE protector
+Note that key-expiry monitoring alone would not have caught Finding 1 — the key was valid until 2028. The failure was access, not expiry.
+
+8.6 Decommission as a deliverable
+Every migration or temporary environment should have decommission written into its plan as a milestone with a named owner. Findings 1, 6 and 7 all stem from environments that outlived their purpose.
+
+8.7 Quarterly review
+Repeat this analysis quarterly. The workbook built for this ticket is reusable — refresh the three exports, and Sheet5 recalculates.
+
+8.8 Use Azure Advisor
+Azure Advisor produces SQL right-sizing recommendations automatically. Review its Cost tab monthly and use it to corroborate findings like these.
+
+APPENDIX A — Resource Graph query (Sheet3)
+kusto
+resources
+| where type == "microsoft.sql/servers/databases" and name != "master"
+| extend server = tostring(split(id,'/')[8])
+| project
+    resourceGroup, server, name,
+    status = tostring(properties.status),
+    tier = tostring(sku.tier),
+    skuName = tostring(sku.name),
+    capacity = toint(sku.capacity),
+    minCapacity = todouble(properties.minCapacity),
+    autoPauseDelay = toint(properties.autoPauseDelay),
+    maxSizeBytes = tolong(properties.maxSizeBytes),
+    licenseType = tostring(properties.licenseType),
+    backupRedundancy = tostring(properties.currentBackupStorageRedundancy),
+    zoneRedundant = tostring(properties.zoneRedundant),
+    readScale = tostring(properties.readScale),
+    elasticPoolId = tostring(properties.elasticPoolId),
+    createdTime = todatetime(properties.creationDate),
+    earliestRestore = todatetime(properties.earliestRestoreDate),
+    tagsText = tostring(tags)
+| order by capacity desc
+APPENDIX B — Utilisation metrics for a shortlist
+Run in Cloud Shell (PowerShell). Replace the list with the databases you intend to change.
+
+powershell
+$targets = @(
+  @{rg="c190voargpbstlasit"; server="bstsitlaserver"; db="bstsitlarep"},
+  @{rg="c190voargpvosdevdatasyncndr"; server="vos-iaz-sql-dev-datasyncs"; db="vosiazsqldbdevndrdatasyncR2"}
 )
-
-# Which local groups to report on.
-# Keep this short - Run Command truncates stdout, so asking for every group
-# on every VM will silently lose rows. Set to @() for all groups.
-$GroupFilter = @("Administrators", "Remote Desktop Users")
-
-# Output file
-$OutputFile = ".\VM_Group_Membership_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-
-# Store results
-$Results = @()
-
-# ------------------------------------------------------------
-# SCRIPT THAT RUNS INSIDE EACH VM
-# ------------------------------------------------------------
-# Single-quoted here-string: nothing in here is expanded locally.
-# __GROUPFILTER__ is substituted just before the call.
-
-$InnerScriptTemplate = @'
-$ErrorActionPreference = "Continue"
-
-$Filter = @(__GROUPFILTER__)
-$Rows   = @()
-
-# Cache local users so we can add Enabled / LastLogon for local members
-$LocalUsers = @{}
-Get-LocalUser -ErrorAction SilentlyContinue | ForEach-Object { $LocalUsers[$_.Name] = $_ }
-
-# Win32_Group gives us a clean, reliable list of local group names
-$Groups = Get-CimInstance -ClassName Win32_Group -Filter "LocalAccount = True" -ErrorAction SilentlyContinue
-
-foreach ($Group in $Groups) {
-
-    $GroupName = $Group.Name
-
-    if ($Filter.Count -gt 0 -and $Filter -notcontains $GroupName) { continue }
-
-    # Bind to the group through the WinNT provider - this is what lusrmgr uses
-    $Members = @()
-    try {
-        $AdsiGroup = [ADSI]"WinNT://./$GroupName,group"
-        $Members   = @($AdsiGroup.psbase.Invoke("Members"))
+$start = (Get-Date).AddDays(-30).ToString("yyyy-MM-ddTHH:mm:ssZ")
+$out = foreach ($t in $targets) {
+  $id = az sql db show -g $t.rg -s $t.server -n $t.db --query id -o tsv
+  $metrics = "cpu_percent","app_cpu_billed","dtu_consumption_percent","connection_successful"
+  foreach ($m in $metrics) {
+    $r = az monitor metrics list --resource $id --metric $m `
+         --interval P1D --aggregation Average Maximum Total `
+         --start-time $start -o json 2>$null | ConvertFrom-Json
+    $d = $r.value.timeseries.data
+    [pscustomobject]@{
+      database = "$($t.server) / $($t.db)"
+      metric   = $m
+      avg      = [math]::Round(($d.average | Measure-Object -Average).Average, 2)
+      max      = [math]::Round(($d.maximum | Measure-Object -Maximum).Maximum, 2)
+      total    = [math]::Round(($d.total   | Measure-Object -Sum).Sum, 2)
     }
-    catch {
-        $Rows += [PSCustomObject]@{
-            GroupName  = $GroupName
-            MemberName = "(group could not be read)"
-            MemberType = ""
-            Scope      = ""
-            SID        = ""
-            Enabled    = ""
-            LastLogon  = ""
-        }
-        continue
-    }
-
-    if ($Members.Count -eq 0) {
-        $Rows += [PSCustomObject]@{
-            GroupName  = $GroupName
-            MemberName = "(no members)"
-            MemberType = ""
-            Scope      = ""
-            SID        = ""
-            Enabled    = ""
-            LastLogon  = ""
-        }
-        continue
-    }
-
-    foreach ($Member in $Members) {
-
-        $Name      = ""
-        $Class     = ""
-        $Authority = ""
-        $Sid       = ""
-
-        try {
-            $Name    = $Member.GetType().InvokeMember("Name",   "GetProperty", $null, $Member, $null)
-            $Class   = $Member.GetType().InvokeMember("Class",  "GetProperty", $null, $Member, $null)
-            $AdsPath = $Member.GetType().InvokeMember("AdsPath","GetProperty", $null, $Member, $null)
-
-            # AdsPath looks like WinNT://USERDOMAIN01/7925990
-            #                 or WinNT://MACHINENAME/BSTAdmin
-            $Parts = ($AdsPath -replace "^WinNT://", "") -split "/"
-            if ($Parts.Count -ge 2) { $Authority = $Parts[$Parts.Count - 2] }
-        }
-        catch { }
-
-        # SID comes straight off the member object, so it still resolves
-        # even when the name cannot be looked up against a DC
-        try {
-            $SidBytes = $Member.GetType().InvokeMember("objectSid", "GetProperty", $null, $Member, $null)
-            $Sid = (New-Object System.Security.Principal.SecurityIdentifier($SidBytes, 0)).Value
-        }
-        catch { }
-
-        if ([string]::IsNullOrWhiteSpace($Name)) { $Name = "(unresolved SID)" }
-
-        if ($Authority -eq $env:COMPUTERNAME -or [string]::IsNullOrWhiteSpace($Authority)) {
-            $Scope      = "Local"
-            $MemberName = $Name
-        }
-        else {
-            $Scope      = "Domain"
-            $MemberName = "$Authority\$Name"
-        }
-
-        $Enabled   = ""
-        $LastLogon = ""
-        if ($Scope -eq "Local" -and $LocalUsers.ContainsKey($Name)) {
-            $Enabled   = $LocalUsers[$Name].Enabled
-            $LastLogon = $LocalUsers[$Name].LastLogon
-        }
-
-        $Rows += [PSCustomObject]@{
-            GroupName  = $GroupName
-            MemberName = $MemberName
-            MemberType = $Class
-            Scope      = $Scope
-            SID        = $Sid
-            Enabled    = $Enabled
-            LastLogon  = $LastLogon
-        }
-    }
+  }
 }
+$out | Export-Csv utilisation.csv -NoTypeInformation
+Metrics that don't apply to a database's model return blank — that's expected.
 
-$Rows | ConvertTo-Csv -NoTypeInformation
-'@
+APPENDIX C — Useful commands
+Apply Hybrid Benefit
 
-$GroupFilterLiteral = ($GroupFilter | ForEach-Object { '"' + $_ + '"' }) -join ","
-$InnerScript = $InnerScriptTemplate.Replace("__GROUPFILTER__", $GroupFilterLiteral)
+az sql db update -g <rg> -s <server> -n <db> --license-type BasePrice
+Change Serverless settings
 
-# ------------------------------------------------------------
-# PROCESS EACH VM
-# ------------------------------------------------------------
+az sql db update -g <rg> -s <server> -n <db> \
+  --min-capacity 0.5 --auto-pause-delay 60
+Reduce maximum storage (value in bytes; 450 GB shown)
 
-foreach ($VM in $VMList) {
+az sql db update -g <rg> -s <server> -n <db> --max-size 450GB
+Export before deleting
 
-    $VMName        = $VM.VMName
-    $ResourceGroup = $VM.ResourceGroup
+az sql db export -g <rg> -s <server> -n <db> \
+  --storage-key-type StorageAccessKey --storage-key <key> \
+  --storage-uri https://<account>.blob.core.windows.net/<container>/<db>.bacpac \
+  --admin-user <user> --admin-password <password>
+⚠️ All commands are for reference. Every change goes through the pipeline if the resource is IaC-managed (Part 5.2), and through change control.
 
-    Write-Host ""
-    Write-Host "Processing $VMName in $ResourceGroup ..."
+APPENDIX D — Verification checklist
+Before this document goes to stakeholders:
 
-    try {
+ Part 1 fixes applied; no MISMATCH rows
+ Sheet1 billing period confirmed as a single complete month
+ Reconciliation total checked (Part 1.6)
+ Every figure quoted re-derived from the corrected workbook
+ Current status of arc11x checked
+ Ownership confirmed for each finding's databases
+ Reservation scope checked
+ IaC status checked for each database proposed for change
+ Workbook labelled OFFICIAL-SENSITIVE
 
-        # First confirm that the VM exists and is running
-        $AzureVM = Get-AzVM `
-            -ResourceGroupName $ResourceGroup `
-            -Name $VMName `
-            -Status `
-            -ErrorAction Stop
-
-        $PowerState = (
-            $AzureVM.Statuses |
-            Where-Object { $_.Code -like "PowerState/*" }
-        ).DisplayStatus
-
-        if ($PowerState -ne "VM running") {
-            $Results += [PSCustomObject]@{
-                VMName     = $VMName
-                ResourceGroup = $ResourceGroup
-                PowerState = $PowerState
-                GroupName  = ""
-                MemberName = ""
-                MemberType = ""
-                Scope      = ""
-                SID        = ""
-                Enabled    = ""
-                LastLogon  = ""
-                Status     = "Skipped - VM not running"
-            }
-            continue
-        }
-
-        # Run PowerShell inside the VM
-        $RunCommand = Invoke-AzVMRunCommand `
-            -ResourceGroupName $ResourceGroup `
-            -VMName $VMName `
-            -CommandId "RunPowerShellScript" `
-            -ScriptString $InnerScript `
-            -ErrorAction Stop
-
-        # Extract Run Command output
-        $RawOutput = $RunCommand.Value |
-            Where-Object { $_.Code -match "ComponentStatus/StdOut/succeeded" } |
-            Select-Object -ExpandProperty Message
-
-        if ([string]::IsNullOrWhiteSpace($RawOutput)) {
-            $Results += [PSCustomObject]@{
-                VMName     = $VMName
-                ResourceGroup = $ResourceGroup
-                PowerState = $PowerState
-                GroupName  = ""
-                MemberName = "No data returned"
-                MemberType = ""
-                Scope      = ""
-                SID        = ""
-                Enabled    = ""
-                LastLogon  = ""
-                Status     = "No data returned"
-            }
-            continue
-        }
-
-        # Convert returned CSV text to PowerShell objects
-        $MemberData = $RawOutput | ConvertFrom-Csv
-
-        foreach ($Row in $MemberData) {
-            $Results += [PSCustomObject]@{
-                VMName        = $VMName
-                ResourceGroup = $ResourceGroup
-                PowerState    = $PowerState
-                GroupName     = $Row.GroupName
-                MemberName    = $Row.MemberName
-                MemberType    = $Row.MemberType
-                Scope         = $Row.Scope
-                SID           = $Row.SID
-                Enabled       = $Row.Enabled
-                LastLogon     = $Row.LastLogon
-                Status        = "Success"
-            }
-        }
-    }
-    catch {
-
-        Write-Warning "Failed to process $VMName : $($_.Exception.Message)"
-
-        $Results += [PSCustomObject]@{
-            VMName        = $VMName
-            ResourceGroup = $ResourceGroup
-            PowerState    = "Unknown"
-            GroupName     = ""
-            MemberName    = ""
-            MemberType    = ""
-            Scope         = ""
-            SID           = ""
-            Enabled       = ""
-            LastLogon     = ""
-            Status        = "Failed: $($_.Exception.Message)"
-        }
-    }
-}
-
-# ------------------------------------------------------------
-# OUTPUT
-# ------------------------------------------------------------
-
-Write-Host ""
-Write-Host "Completed."
-
-$Results |
-    Sort-Object VMName, GroupName, Scope, MemberName |
-    Format-Table `
-        VMName,
-        GroupName,
-        MemberName,
-        MemberType,
-        Scope,
-        Enabled,
-        LastLogon,
-        Status -AutoSize
-
-$Results | Export-Csv -Path $OutputFile -NoTypeInformation
-Write-Host ""
-Write-Host "CSV written to $OutputFile"
