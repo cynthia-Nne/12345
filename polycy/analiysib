@@ -1,0 +1,12 @@
+
+Hi Neal,
+
+I’m , a Cloud/DevOps engineer at Cognizant supporting the VOA/NDR programme.  suggested I reach out to you.
+
+We’re investigating possible references to legacy domain controllers in the service configuration for two C190 VMs: 10.186.29.87 and 10.186.28.52.
+
+The domain controller discovery check on 10.186.29.87 returned 10.186.255.139, which  confirmed is one of the new Azure domain controllers. The other VM, 10.186.28.52, is not domain joined. We’d appreciate your help understanding where any legacy references might be coming from.
+
+Could you help us investigate? I can share the screenshots and results from my checks.
+
+Thanks,
