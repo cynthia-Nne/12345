@@ -1,831 +1,893 @@
-#  Scheduled stop/start of NDR non-production environments
-# Scheduled runs:  Stop at 19:00 UK time, Start at 07:00 UK time, Monday-Friday.
-# Weekends are covered automatically: Friday's Stop is not undone until Monday's Start.
-#
-# Azure DevOps cron times are UTC. Each schedule fires at BOTH possible UTC hours
-# (one for GMT, one for BST). The script checks the UK time and exits straight away
-# on the "wrong" one, so you will see one short do-nothing run per schedule. That is expected.
-
-trigger: none
-pr: none
-
-schedules:
-- cron: "0 19,20 * * 1-5"      # 19:00 UK in summer (18 UTC) and winter (19 UTC)
-  displayName: Stop
-  branches:
-    include:
-    - main                     # CHANGE if your default branch is master/develop
-  always: true                 # IMPORTANT: run even if no code has changed
-- cron: "0 5,6 * * 1-5"        # 07:00 UK in summer (06 UTC) and winter (07 UTC)
-  displayName: Start
-  branches:
-    include:
-    - main
-  always: true
-
-# These appear when you press "Run pipeline" manually (e.g. an out-of-hours override).
-# Scheduled runs always use the defaults.
-parameters:
-- name: action
-  displayName: Action (Auto = decided by the schedule)
-  type: string
-  default: Auto
-  values: [ Auto, Stop, Start ]
-- name: environment
-  displayName: Environment
-  type: string
-  default: All
-  values: [ All, DEV, SIT, UAT, MO, Training, PPE, NFT, DR ]
-- name: dryRun
-  displayName: Dry run (only log what would happen, change nothing)
-  type: boolean
-  default: true               # CHANGE to false once testing on DEV is signed off
-
-variables:
-  serviceConnection: 'REPLACE-WITH-YOUR-EXISTING-SERVICE-CONNECTION-NAME'
-
-pool:
-  vmImage: ubuntu-latest       # If your org only allows self-hosted agents, use:  name: <your-agent-pool>
-
-jobs:
-- job: EnvScheduler
-  displayName: ${{ parameters.action }} - ${{ parameters.environment }}
-  timeoutInMinutes: 90
-  steps:
-  - checkout: self
-
-  - task: AzureCLI@2
-    displayName: Run NDR environment scheduler
-    inputs:
-      azureSubscription: ${{ variables.serviceConnection }}
-      scriptType: pscore
-      scriptLocation: scriptPath
-      scriptPath: pipelines/env-scheduler/scripts/Invoke-EnvScheduler.ps1
-      arguments: >-
-        -Action ${{ parameters.action }}
-        -Environment ${{ parameters.environment }}
-        -DryRun ${{ parameters.dryRun }}
-        -ReportDir $(Build.ArtifactStagingDirectory)/report
-
-  - task: PublishPipelineArtifact@1
-    displayName: Publish run report (CSV)
-    condition: always()
-    inputs:
-      targetPath: $(Build.ArtifactStagingDirectory)/report
-      artifact: env-scheduler-report-$(System.JobAttempt)
-
-
-      2. Settings: pipelines/env-scheduler/config/environments.json
-
-Replace every REPLACE value, and put your resource names in includeResourceNames.
-
-
-{
-  "_readme": " config. Replace every REPLACE value. selectionMode 'includeList' = ONLY resources named in each environment's includeResourceNames are touched (empty list = nothing touched). 'allSupported' = every supported resource in resourceGroups. Exclusions (global list, environment list, or tag AutoShutdown=Excluded) always win. Names are exact resource names; for SQL databases use server/database.",
-
-  "selectionMode": "includeList",
-
-  "timeZone": "Europe/London",
-  "stopHour": 20,
-  "startHour": 6,
-
-  "bankHolidays": [
-    "2026-12-25", "2026-12-28",
-    "2027-01-01", "2027-03-26", "2027-03-29", "2027-05-03",
-    "2027-05-31", "2027-08-30", "2027-12-27", "2027-12-28"
-  ],
-
-  "stateStorage": {
-    "subscriptionId": "REPLACE-subscription-id-of-storage-account",
-    "accountName": "REPLACEstorageaccountname",
-    "container": "env-scheduler-state"
-  },
-
-  "defaults": {
-    "appServicePlan": { "enabled": true,  "downSku": "B1", "downWorkers": 1 },
-    "sqlDatabase":    { "enabled": false, "downEdition": "Standard", "downServiceObjective": "S0" }
-  },
-
-  "excludeResourceNames": [],
-
-  "environments": [
-    {
-      "name": "DEV", "enabled": true, "subscriptionId": "REPLACE",
-      "resourceGroups": ["REPLACE-rg-ndr-dev"],
-      "includeResourceNames": [],
-      "excludeResourceNames": []
-    },
-    {
-      "name": "SIT", "enabled": false, "subscriptionId": "REPLACE",
-      "resourceGroups": ["REPLACE-rg-ndr-sit"],
-      "includeResourceNames": [],
-      "excludeResourceNames": []
-    },
-    {
-      "name": "UAT", "enabled": false, "subscriptionId": "REPLACE",
-      "resourceGroups": ["REPLACE-rg-ndr-uat"],
-      "includeResourceNames": [],
-      "excludeResourceNames": []
-    },
-    {
-      "name": "MO", "enabled": false, "subscriptionId": "REPLACE",
-      "resourceGroups": ["REPLACE-rg-ndr-mo"],
-      "includeResourceNames": [],
-      "excludeResourceNames": []
-    },
-    {
-      "name": "Training", "enabled": false, "subscriptionId": "REPLACE",
-      "resourceGroups": ["REPLACE-rg-ndr-trn"],
-      "includeResourceNames": [],
-      "excludeResourceNames": []
-    },
-    {
-      "name": "PPE", "enabled": false, "subscriptionId": "REPLACE",
-      "resourceGroups": ["REPLACE-rg-ndr-ppe"],
-      "includeResourceNames": [],
-      "excludeResourceNames": []
-    },
-    {
-      "name": "NFT", "enabled": false, "subscriptionId": "REPLACE",
-      "resourceGroups": ["REPLACE-rg-ndr-nft"],
-      "includeResourceNames": [],
-      "excludeResourceNames": []
-    },
-    {
-      "name": "DR", "enabled": false, "subscriptionId": "REPLACE",
-      "resourceGroups": ["REPLACE-rg-ndr-dr"],
-      "includeResourceNames": [],
-      "excludeResourceNames": []
-    }
-  ]
-}
-
-
-3. Script: pipelines/env-scheduler/scripts/Invoke-EnvScheduler.ps1
-
-You don't need to change anything in this file.
-
-
-
-<#
-.SYNOPSIS
-  BST-169496 - Stops / scales down NDR non-production resources out of hours and restores them.
-
-.DESCRIPTION
-  Stop  : Finds supported resources in each enabled environment (skipping anything tagged
-          AutoShutdown=Excluded or listed in excludeResourceNames), deallocates / stops / scales
-          them down, and records what it changed in <ENV>.json in blob storage.
-  Start : Reads <ENV>.json and restores ONLY what the Stop run changed, to its original size.
-  Auto  : Used by scheduled runs. Picks Stop/Start from the schedule name and only acts at the
-          configured UK hour, so one cron pair works in both GMT and BST.
-
-  Supported: Virtual Machines, VM Scale Sets, App Service Plans,
-             Azure SQL Databases (off by default), SQL Managed Instances.
-#>
-[CmdletBinding()]
-param(
-    [ValidateSet('Auto', 'Stop', 'Start')]
-    [string]$Action = 'Auto',
-    [string]$Environment = 'All',
-    [string]$DryRun = 'true',
-    [string]$ConfigPath = (Join-Path $PSScriptRoot '../config/environments.json'),
-    [string]$ReportDir = './report',
-    [string]$ScheduleName = $env:BUILD_CRONSCHEDULE_DISPLAYNAME
-)
-
-$ErrorActionPreference = 'Stop'
-$IsDryRun = $DryRun -eq 'true'
-New-Item -ItemType Directory -Path $ReportDir -Force | Out-Null
-$cfg = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
-
-# Front ends go down first; data tier comes back first.
-$StopOrder = @(
-    'microsoft.web/serverfarms',
-    'microsoft.compute/virtualmachinescalesets',
-    'microsoft.compute/virtualmachines',
-    'microsoft.sql/servers/databases',
-    'microsoft.sql/managedinstances'
-)
-$StartOrder = $StopOrder[($StopOrder.Count - 1)..0]
-
-$OffHoursPerWeek = ((24 - ($cfg.stopHour - $cfg.startHour)) * 5) + 48
-$Errors = [System.Collections.Generic.List[string]]::new()
-$Report = [System.Collections.Generic.List[object]]::new()
-$PriceCache = @{}
-$StateDir = Join-Path ([IO.Path]::GetTempPath()) 'env-scheduler-state'
-New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
-
-# ------------------------------------------------------------------ helpers
-function Invoke-Az {
-    param([Parameter(Mandatory)][string[]]$AzArgs, [switch]$Json)
-    $out = & az @AzArgs --only-show-errors
-    if ($LASTEXITCODE -ne 0) { throw "az $($AzArgs -join ' ') failed (exit code $LASTEXITCODE)" }
-    $text = ($out -join "`n").Trim()
-    if ($Json) { if ($text) { return ($text | ConvertFrom-Json) } else { return $null } }
-    return $text
-}
-
-function Invoke-Change {
-    param([string]$Description, [string[]]$AzArgs)
-    if ($IsDryRun) { Write-Host "    [DRY-RUN] Would $Description"; return 'DryRun' }
-    Write-Host "    $Description"
-    Invoke-Az -AzArgs $AzArgs | Out-Null
-    return 'Done'
-}
-
-function Add-Row {
-    param($EnvName, $Name, $Type, $Rg, $Result, $Detail, $Saving = '')
-    $Report.Add([pscustomobject]@{
-        Environment = $EnvName; Action = $Action; Resource = $Name; Type = $Type
-        ResourceGroup = $Rg; Result = $Result; Detail = $Detail; EstWeeklySavingGBP = $Saving
-    })
-    Write-Host ("  {0,-8} {1} [{2}] - {3}" -f $Result, $Name, $Type, $Detail)
-}
-
-function Get-UkNow {
-    try { $tz = [TimeZoneInfo]::FindSystemTimeZoneById($cfg.timeZone) }
-    catch { $tz = [TimeZoneInfo]::FindSystemTimeZoneById('GMT Standard Time') }
-    return [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $tz)
-}
-
-# Public Azure Retail Prices API (list price, no auth). Estimates only - excludes any discounts.
-function Get-VmHourlyPrice {
-    param([string]$Size, [string]$Region, [string]$Os)
-    $key = "$Size|$Region|$Os"
-    if ($PriceCache.ContainsKey($key)) { return $PriceCache[$key] }
-    $price = $null
-    try {
-        $filter = "serviceName eq 'Virtual Machines' and armRegionName eq '$Region' and armSkuName eq '$Size' and priceType eq 'Consumption'"
-        $uri = "https://prices.azure.com/api/retail/prices?currencyCode='GBP'&`$filter=$([uri]::EscapeDataString($filter))"
-        $items = (Invoke-RestMethod -Uri $uri -TimeoutSec 30).Items | Where-Object { $_.skuName -notmatch 'Spot|Low Priority' }
-        $wantWindows = $Os -eq 'Windows'
-        $match = $items | Where-Object { ($_.productName -match 'Windows') -eq $wantWindows } | Select-Object -First 1
-        if ($match) { $price = [double]$match.retailPrice }
-    }
-    catch { Write-Host "    (price lookup failed for $Size / $Region - $($_.Exception.Message))" }
-    $PriceCache[$key] = $price
-    return $price
-}
-
-function Get-WeeklySaving {
-    param([string]$Size, [string]$Region, [string]$Os, [int]$Count = 1)
-    $p = Get-VmHourlyPrice -Size $Size -Region $Region -Os $Os
-    if ($null -eq $p) { return 'n/a' }
-    return [math]::Round($p * $Count * $OffHoursPerWeek, 2)
-}
-
-# ------------------------------------------------------------------ state file (blob storage)
-function Get-StorageArgs {
-    $s = $cfg.stateStorage
-    return @('--account-name', $s.accountName, '--container-name', $s.container, '--auth-mode', 'key', '--subscription', $s.subscriptionId)
-}
-
-function Initialize-StateContainer {
-    $s = $cfg.stateStorage
-    Invoke-Az -AzArgs @('storage', 'container', 'create', '--name', $s.container, '--account-name', $s.accountName,
-        '--auth-mode', 'key', '--subscription', $s.subscriptionId) | Out-Null
-}
-
-function Read-State {
-    param([string]$EnvName)
-    $blob = "$EnvName.json"; $file = Join-Path $StateDir $blob
-    $exists = Invoke-Az -AzArgs (@('storage', 'blob', 'exists', '--name', $blob, '--query', 'exists', '-o', 'tsv') + (Get-StorageArgs))
-    if ($exists -ne 'true') { return @{} }
-    Remove-Item $file -ErrorAction SilentlyContinue
-    Invoke-Az -AzArgs (@('storage', 'blob', 'download', '--name', $blob, '--file', $file) + (Get-StorageArgs)) | Out-Null
-    $json = Get-Content $file -Raw
-    if (-not $json) { return @{} }
-    return ($json | ConvertFrom-Json -AsHashtable)
-}
-
-function Write-State {
-    param([string]$EnvName, [hashtable]$State)
-    $blob = "$EnvName.json"; $file = Join-Path $StateDir $blob
-    $State | ConvertTo-Json -Depth 5 | Set-Content -Path $file -Encoding utf8
-    Invoke-Az -AzArgs (@('storage', 'blob', 'upload', '--name', $blob, '--file', $file, '--overwrite') + (Get-StorageArgs)) | Out-Null
-}
-
-# ------------------------------------------------------------------ discovery
-function Get-EnvResources {
-    param($E)
-    $found = @()
-    if ($E.resourceGroups -and @($E.resourceGroups).Count -gt 0) {
-        foreach ($rg in $E.resourceGroups) { $found += @(Invoke-Az -Json -AzArgs @('resource', 'list', '-g', $rg, '-o', 'json')) }
-    }
-    else { $found = @(Invoke-Az -Json -AzArgs @('resource', 'list', '-o', 'json')) }
-
-    $include = @(@($E.includeResourceNames) | Where-Object { $_ })
-    $exclude = @(@($cfg.excludeResourceNames) + @($E.excludeResourceNames) | Where-Object { $_ })
-    $mode = if ($cfg.selectionMode) { $cfg.selectionMode } else { 'includeList' }
-
-    # 1. INCLUDE list
-    if ($mode -eq 'includeList') {
-        if ($include.Count -eq 0) {
-            Write-Host "  selectionMode is 'includeList' but $($E.name) has no includeResourceNames - nothing will be touched."
-            return @()
-        }
-        Write-Host "  Include list: $($include.Count) resource name(s)."
-        $foundNames = @($found | ForEach-Object { $_.name })
-        foreach ($i in $include) {
-            if ($foundNames -notcontains $i) {
-                Write-Host "##vso[task.logissue type=warning]$($E.name): '$i' is in includeResourceNames but was not found in the listed resource groups - check the spelling and resourceGroups."
-                Add-Row -EnvName $E.name -Name $i -Type '?' -Rg '?' -Result 'NotFound' -Detail 'In include list but not found'
-            }
-        }
-        $found = @($found | Where-Object { $include -contains $_.name })
-        foreach ($r in $found | Where-Object { $StopOrder -notcontains $_.type.ToLower() }) {
-            Write-Host "##vso[task.logissue type=warning]$($E.name): '$($r.name)' is type $($r.type), which the scheduler cannot stop or scale."
-            Add-Row -EnvName $E.name -Name $r.name -Type $r.type -Rg $r.resourceGroup -Result 'Skipped' -Detail 'Resource type not supported'
-        }
-    }
-
-    # 2. EXCLUDE list and AutoShutdown=Excluded tag always win over the include list
-    $selected = @()
-    foreach ($r in $found | Where-Object { ($StopOrder -contains $_.type.ToLower()) -and ($_.resourceGroup -notlike 'MC_*') }) {
-        if ($exclude -contains $r.name) {
-            Add-Row -EnvName $E.name -Name $r.name -Type $r.type -Rg $r.resourceGroup -Result 'Excluded' -Detail 'In excludeResourceNames'
-        }
-        elseif ($r.tags -and $r.tags.AutoShutdown -eq 'Excluded') {
-            Add-Row -EnvName $E.name -Name $r.name -Type $r.type -Rg $r.resourceGroup -Result 'Excluded' -Detail 'Tag AutoShutdown=Excluded'
-        }
-        else { $selected += $r }
-    }
-    return @($selected | Sort-Object { $StopOrder.IndexOf($_.type.ToLower()) })
-}
-
-# ------------------------------------------------------------------ stop / scale down
-function Stop-Resource {
-    param($R, [hashtable]$State, [string]$EnvName)
-    $rg = $R.resourceGroup; $n = $R.name; $type = $R.type.ToLower()
-    $row = @{ EnvName = $EnvName; Name = $n; Type = $R.type; Rg = $rg }
-    $record = @{ type = $type; name = $n; resourceGroup = $rg; changedAtUtc = [DateTime]::UtcNow.ToString('o') }
-
-    switch ($type) {
-        'microsoft.compute/virtualmachines' {
-            $vm = Invoke-Az -Json -AzArgs @('vm', 'show', '-d', '-g', $rg, '-n', $n, '--query', '{power:powerState, size:hardwareProfile.vmSize, os:storageProfile.osDisk.osType}')
-            if ($vm.power -ne 'VM running') { Add-Row @row -Result 'Skipped' -Detail "Not running ($($vm.power))"; return }
-            $saving = Get-WeeklySaving -Size $vm.size -Region $R.location -Os $vm.os
-            $res = Invoke-Change -Description "deallocate VM $n ($($vm.size))" -AzArgs @('vm', 'deallocate', '-g', $rg, '-n', $n, '--no-wait')
-            $State[$R.id] = $record
-            Add-Row @row -Result $res -Detail "Deallocated ($($vm.size))" -Saving $saving
-        }
-        'microsoft.compute/virtualmachinescalesets' {
-            $ss = Invoke-Az -Json -AzArgs @('vmss', 'show', '-g', $rg, '-n', $n, '--query', '{size:sku.name, capacity:sku.capacity, os:virtualMachineProfile.storageProfile.osDisk.osType}')
-            if (-not $ss.capacity) { Add-Row @row -Result 'Skipped' -Detail 'Capacity is 0'; return }
-            $running = Invoke-Az -AzArgs @('vmss', 'list-instances', '-g', $rg, '-n', $n, '--expand', 'instanceView',
-                '--query', "length([?instanceView.statuses[?code=='PowerState/running']])", '-o', 'tsv')
-            if ([int]$running -eq 0) { Add-Row @row -Result 'Skipped' -Detail 'No running instances'; return }
-            $saving = Get-WeeklySaving -Size $ss.size -Region $R.location -Os $ss.os -Count ([int]$running)
-            $res = Invoke-Change -Description "deallocate scale set $n ($running x $($ss.size))" -AzArgs @('vmss', 'deallocate', '-g', $rg, '-n', $n, '--no-wait')
-            $State[$R.id] = $record
-            Add-Row @row -Result $res -Detail "Deallocated $running x $($ss.size)" -Saving $saving
-        }
-        'microsoft.web/serverfarms' {
-            $c = $cfg.defaults.appServicePlan
-            if (-not $c.enabled) { Add-Row @row -Result 'Skipped' -Detail 'App Service Plan scaling disabled in config'; return }
-            $p = Invoke-Az -Json -AzArgs @('appservice', 'plan', 'show', '-g', $rg, '-n', $n, '--query', '{sku:sku.name, workers:sku.capacity}')
-            if ($p.sku -match '^(Y1|EP|I|FC|WS|F1|D1)') { Add-Row @row -Result 'Skipped' -Detail "SKU $($p.sku) is not suitable for scaling down"; return }
-            if ($p.sku -eq $c.downSku -and [int]$p.workers -le [int]$c.downWorkers) { Add-Row @row -Result 'Skipped' -Detail 'Already at off-hours size'; return }
-            $res = Invoke-Change -Description "scale plan $n from $($p.sku) x$($p.workers) to $($c.downSku) x$($c.downWorkers)" `
-                -AzArgs @('appservice', 'plan', 'update', '-g', $rg, '-n', $n, '--sku', $c.downSku, '--number-of-workers', "$($c.downWorkers)")
-            if (-not $State.ContainsKey($R.id)) {
-                $record.originalSku = $p.sku; $record.originalWorkers = [int]$p.workers
-                $State[$R.id] = $record
-            }
-            Add-Row @row -Result $res -Detail "$($p.sku) x$($p.workers) -> $($c.downSku) x$($c.downWorkers)" -Saving 'See Cost Management'
-        }
-        'microsoft.sql/servers/databases' {
-            $server, $db = $n -split '/', 2
-            if ($db -eq 'master') { return }
-            $c = $cfg.defaults.sqlDatabase
-            if (-not $c.enabled) { Add-Row @row -Result 'Skipped' -Detail 'SQL Database scaling disabled in config'; return }
-            $d = Invoke-Az -Json -AzArgs @('sql', 'db', 'show', '-g', $rg, '-s', $server, '-n', $db, '--query', '{so:currentServiceObjectiveName, edition:edition, pool:elasticPoolId}')
-            if ($d.pool) { Add-Row @row -Result 'Skipped' -Detail 'In an elastic pool'; return }
-            if ($d.so -match '_S_') { Add-Row @row -Result 'Skipped' -Detail 'Serverless - pauses itself'; return }
-            if ($d.edition -in @('Hyperscale', 'DataWarehouse', 'System')) { Add-Row @row -Result 'Skipped' -Detail "Edition $($d.edition) not supported"; return }
-            if ($d.so -eq $c.downServiceObjective) { Add-Row @row -Result 'Skipped' -Detail 'Already at off-hours size'; return }
-            $res = Invoke-Change -Description "scale database $n from $($d.so) to $($c.downServiceObjective)" `
-                -AzArgs @('sql', 'db', 'update', '-g', $rg, '-s', $server, '-n', $db, '--edition', $c.downEdition, '--service-objective', $c.downServiceObjective, '--no-wait')
-            if (-not $State.ContainsKey($R.id)) {
-                $record.server = $server; $record.database = $db
-                $record.originalEdition = $d.edition; $record.originalServiceObjective = $d.so
-                $State[$R.id] = $record
-            }
-            Add-Row @row -Result $res -Detail "$($d.so) -> $($c.downServiceObjective)" -Saving 'See Cost Management'
-        }
-        'microsoft.sql/managedinstances' {
-            $st = Invoke-Az -AzArgs @('sql', 'mi', 'show', '-g', $rg, '-n', $n, '--query', 'state', '-o', 'tsv')
-            if ($st -ne 'Ready') { Add-Row @row -Result 'Skipped' -Detail "State $st"; return }
-            $res = Invoke-Change -Description "stop SQL Managed Instance $n (takes several minutes)" -AzArgs @('sql', 'mi', 'stop', '-g', $rg, '--mi', $n)
-            $State[$R.id] = $record
-            Add-Row @row -Result $res -Detail 'Instance stopped' -Saving 'See Cost Management'
-        }
-    }
-}
-
-# ------------------------------------------------------------------ start / restore
-# Returns 'Done' or 'Drop' (remove from state) or 'DryRun' (keep).
-function Start-Resource {
-    param([string]$Id, [hashtable]$E, [string]$EnvName)
-    $rg = $E.resourceGroup; $n = $E.name
-    $row = @{ EnvName = $EnvName; Name = $n; Type = $E.type; Rg = $rg }
-
-    switch ($E.type) {
-        'microsoft.compute/virtualmachines' {
-            $res = Invoke-Change -Description "start VM $n" -AzArgs @('vm', 'start', '-g', $rg, '-n', $n, '--no-wait')
-        }
-        'microsoft.compute/virtualmachinescalesets' {
-            $res = Invoke-Change -Description "start scale set $n" -AzArgs @('vmss', 'start', '-g', $rg, '-n', $n, '--no-wait')
-        }
-        'microsoft.sql/managedinstances' {
-            $res = Invoke-Change -Description "start SQL Managed Instance $n (takes several minutes)" -AzArgs @('sql', 'mi', 'start', '-g', $rg, '--mi', $n)
-        }
-        'microsoft.web/serverfarms' {
-            $c = $cfg.defaults.appServicePlan
-            $cur = Invoke-Az -Json -AzArgs @('appservice', 'plan', 'show', '-g', $rg, '-n', $n, '--query', '{sku:sku.name, workers:sku.capacity}')
-            if ($cur.sku -ne $c.downSku) {
-                Add-Row @row -Result 'Skipped' -Detail "SKU is now $($cur.sku) - changed since Stop (e.g. a Bicep deploy), left as is"
-                return 'Drop'
-            }
-            $res = Invoke-Change -Description "restore plan $n to $($E.originalSku) x$($E.originalWorkers)" `
-                -AzArgs @('appservice', 'plan', 'update', '-g', $rg, '-n', $n, '--sku', $E.originalSku, '--number-of-workers', "$($E.originalWorkers)")
-        }
-        'microsoft.sql/servers/databases' {
-            $c = $cfg.defaults.sqlDatabase
-            $cur = Invoke-Az -AzArgs @('sql', 'db', 'show', '-g', $rg, '-s', $E.server, '-n', $E.database, '--query', 'currentServiceObjectiveName', '-o', 'tsv')
-            if ($cur -ne $c.downServiceObjective) {
-                Add-Row @row -Result 'Skipped' -Detail "Size is now $cur - changed since Stop, left as is"
-                return 'Drop'
-            }
-            $res = Invoke-Change -Description "restore database $n to $($E.originalServiceObjective)" `
-                -AzArgs @('sql', 'db', 'update', '-g', $rg, '-s', $E.server, '-n', $E.database, '--edition', $E.originalEdition, '--service-objective', $E.originalServiceObjective, '--no-wait')
-        }
-        default {
-            Add-Row @row -Result 'Skipped' -Detail 'Unknown type in state file'
-            return 'Drop'
-        }
-    }
-    Add-Row @row -Result $res -Detail 'Restore requested'
-    return $res
-}
-
-# ================================================================== main
-if ($Action -eq 'Auto') {
-    if ($ScheduleName -notin @('Stop', 'Start')) {
-        throw "Action 'Auto' is only for scheduled runs. For a manual run choose Stop or Start."
-    }
-    $Action = $ScheduleName
-    $ukNow = Get-UkNow
-    $targetHour = if ($Action -eq 'Stop') { [int]$cfg.stopHour } else { [int]$cfg.startHour }
-    if ($ukNow.Hour -ne $targetHour) {
-        Write-Host "UK time is $($ukNow.ToString('HH:mm')). $Action runs at $($targetHour):00 UK time, so this is the spare GMT/BST trigger - nothing to do."
-        exit 0
-    }
-    if ($Action -eq 'Start' -and (@($cfg.bankHolidays) -contains $ukNow.ToString('yyyy-MM-dd'))) {
-        Write-Host 'Today is a bank holiday - environments stay off.'
-        exit 0
-    }
-}
-
-Write-Host "Action: $Action | Environment: $Environment | Dry run: $IsDryRun"
-$envs = @($cfg.environments | Where-Object { $_.enabled -and ($Environment -eq 'All' -or $_.name -eq $Environment) })
-if ($envs.Count -eq 0) { Write-Host "No ENABLED environment matches '$Environment' - check config/environments.json."; exit 0 }
-if (-not $IsDryRun) { Initialize-StateContainer }
-
-foreach ($e in $envs) {
-    Write-Host ''
-    Write-Host "========== $($e.name) : $Action =========="
-    try {
-        try { $state = Read-State -EnvName $e.name }
-        catch {
-            if ($IsDryRun) { Write-Host "  (could not read state file during dry run: $($_.Exception.Message))"; $state = @{} }
-            else { throw }
-        }
-        Invoke-Az -AzArgs @('account', 'set', '--subscription', $e.subscriptionId) | Out-Null
-
-        if ($Action -eq 'Stop') {
-            foreach ($r in @(Get-EnvResources -E $e)) {
-                try { Stop-Resource -R $r -State $state -EnvName $e.name }
-                catch {
-                    $Errors.Add("[$($e.name)] $($r.name): $($_.Exception.Message)")
-                    Add-Row -EnvName $e.name -Name $r.name -Type $r.type -Rg $r.resourceGroup -Result 'FAILED' -Detail $_.Exception.Message
-                }
-            }
-        }
-        else {
-            $ids = @(@($state.Keys) | Sort-Object { $StartOrder.IndexOf($state[$_].type) })
-            if ($ids.Count -eq 0) { Write-Host '  Nothing recorded by the last Stop run - nothing to start.' }
-            foreach ($id in $ids) {
-                try {
-                    $res = Start-Resource -Id $id -E $state[$id] -EnvName $e.name
-                    if ($res -in @('Done', 'Drop')) { $state.Remove($id) }
-                }
-                catch {
-                    $Errors.Add("[$($e.name)] $($state[$id].name): $($_.Exception.Message)")
-                    Add-Row -EnvName $e.name -Name $state[$id].name -Type $state[$id].type -Rg $state[$id].resourceGroup -Result 'FAILED' -Detail $_.Exception.Message
-                }
-            }
-        }
-        if (-not $IsDryRun) { Write-State -EnvName $e.name -State $state }
-    }
-    catch {
-        $Errors.Add("[$($e.name)] $($_.Exception.Message)")
-        Write-Host "  ERROR: $($_.Exception.Message)"
-    }
-}
-
-# ------------------------------------------------------------------ report
-$stamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmm')
-if ($Report.Count -gt 0) {
-    $Report | Export-Csv -Path (Join-Path $ReportDir "env-scheduler-$Action-$stamp.csv") -NoTypeInformation
-}
-if ($Action -eq 'Stop') {
-    $weekly = [double](($Report | Where-Object { $_.EstWeeklySavingGBP -is [double] } | Measure-Object -Property EstWeeklySavingGBP -Sum).Sum)
-    $summary = Join-Path $ReportDir 'summary.md'
-    @(
-        "## NDR non-prod scheduler - $Action"
-        "* Dry run: $IsDryRun"
-        "* Resources processed: $($Report.Count) (failed: $($Errors.Count))"
-        "* Off hours per week: $OffHoursPerWeek"
-        "* Estimated weekly saving, VMs/VMSS at list price: GBP $([math]::Round($weekly, 2))"
-        "* Estimated monthly: GBP $([math]::Round($weekly * 4.33, 2))"
-        "* App Service Plans and SQL: confirm with Cost Management"
-    ) | Set-Content -Path $summary -Encoding utf8
-    Write-Host "##vso[task.uploadsummary]$summary"
-}
-
-if ($Errors.Count -gt 0) {
-    foreach ($x in $Errors) { Write-Host "##vso[task.logissue type=error]$x" }
-    exit 1
-}
-Write-Host 'Completed successfully.'
-
-
-
-
-# - Scheduled stop/start of NDR non-production environments
-# Scheduled runs:  Stop at 19:00 UK time, Start at 07:00 UK time, Monday-Friday.
-# Weekends are covered automatically: Friday's Stop is not undone until Monday's Start.
-#
-# Azure DevOps cron times are UTC. Each schedule fires at BOTH possible UTC hours
-# (one for GMT, one for BST). The script checks the UK time and exits straight away
-# on the "wrong" one, so you will see one short do-nothing run per schedule. That is expected.
-
-trigger: none
-pr: none
-
-schedules:
-- cron: "0 18,19 * * 1-5"      # 19:00 UK in summer (18 UTC) and winter (19 UTC)
-  displayName: Stop
-  branches:
-    include:
-    - main                     # CHANGE if your default branch is master/develop
-  always: true                 # IMPORTANT: run even if no code has changed
-- cron: "0 6,7 * * 1-5"        # 07:00 UK in summer (06 UTC) and winter (07 UTC)
-  displayName: Start
-  branches:
-    include:
-    - main
-  always: true
-
-# These appear when you press "Run pipeline" manually (e.g. an out-of-hours override).
-# Scheduled runs always use the defaults.
-parameters:
-- name: action
-  displayName: Action (Auto = decided by the schedule)
-  type: string
-  default: Auto
-  values: [ Auto, Stop, Start ]
-- name: environment
-  displayName: Environment
-  type: string
-  default: All
-  values: [ All, DEV, SIT, UAT, MO, Training, PPE, NFT, DR ]
-- name: dryRun
-  displayName: Dry run (only log what would happen, change nothing)
-  type: boolean
-  default: true               # CHANGE to false once testing on DEV is signed off
-
-variables:
-  serviceConnection: 'REPLACE-WITH-YOUR-EXISTING-SERVICE-CONNECTION-NAME'
-
-pool:
-  vmImage: ubuntu-latest       # If your org only allows self-hosted agents, use:  name: <your-agent-pool>
-
-jobs:
-- job: EnvScheduler
-  displayName: ${{ parameters.action }} - ${{ parameters.environment }}
-  timeoutInMinutes: 90
-  steps:
-  - checkout: self
-
-  - task: AzureCLI@2
-    displayName: Run NDR environment scheduler
-    inputs:
-      azureSubscription: ${{ variables.serviceConnection }}
-      scriptType: pscore
-      scriptLocation: scriptPath
-      scriptPath: pipelines/env-scheduler/scripts/Invoke-EnvScheduler.ps1
-      arguments: >-
-        -Action ${{ parameters.action }}
-        -Environment ${{ parameters.environment }}
-        -DryRun ${{ parameters.dryRun }}
-        -ConfigPath $(Build.SourcesDirectory)/pipelines/env-scheduler/config/environments.json
-        -ReportDir $(Build.ArtifactStagingDirectory)/report
-
-  - task: PublishPipelineArtifact@1
-    displayName: Publish run report (CSV)
-    condition: always()
-    inputs:
-      targetPath: $(Build.ArtifactStagingDirectory)/report
-      artifact: env-scheduler-report-$(System.JobAttempt)
-
-
-
-
-
-
-
-
-
-
-
-Here's the pipeline one section at a time, in the order it appears in the file.
-
-## 1. Comments at the top
-
-```yaml
-#  - Scheduled stop/start ...
-```
-Lines starting with `#` are notes for humans. Azure DevOps ignores them.
-
-## 2. Turning off the automatic triggers
-
-```yaml
-trigger: none
-pr: none
-```
-- `trigger: none` means **don't** run when someone pushes code. Your Bicep pipelines usually run on push, but this one shouldn't. Editing the config file shouldn't switch environments off.
-- `pr: none` means don't run on pull requests either.
-
-So this pipeline only runs **on its schedule** or **when you click Run**.
-
-## 3. The schedule (the timer)
-
-```yaml
-schedules:
-- cron: "0 18,19 * * 1-5"
-  displayName: Stop
-  branches:
-    include:
-    - main
-  always: true
-```
-`cron` is a timetable written in 5 parts:
-
-| Part | Value | Meaning |
-|---|---|---|
-| Minute | `0` | at minute 0 (on the hour) |
-| Hour | `18,19` | at 18:00 **and** 19:00 |
-| Day of month | `*` | any day |
-| Month | `*` | any month |
-| Day of week | `1-5` | Monday to Friday |
-
-**Why two hours?** Azure DevOps only works in UTC, which never changes for summer time, but UK time does:
-- In summer (BST), 19:00 UK = **18:00** UTC.
-- In winter (GMT), 19:00 UK = **19:00** UTC.
-
-So it fires at both. The script checks the real UK time, acts on the right one, and the other run ends in seconds with *"spare GMT/BST trigger – nothing to do"*. That means nobody has to edit the pipeline when the clocks change.
-
-The other settings:
-- `displayName: Stop` names this schedule. The script reads the name to know whether it should stop or start.
-- `branches: include: main` uses the YAML and config on the **main** branch. Schedules don't fire from feature branches.
-- `always: true` is **very important**. Without it, Azure DevOps only runs the schedule if code has changed since the last run, so it would silently stop running after the first night.
-
-The second schedule (`0 6,7 * * 1-5`, named **Start**) works the same way for 07:00 UK. Neither schedule runs on Saturday or Sunday, so Friday's stop lasts until Monday morning.
-
-## 4. Parameters (the options when you click Run)
-
-```yaml
-parameters:
-- name: action
-  default: Auto
-  values: [ Auto, Stop, Start ]
-- name: environment
-  default: All
-  values: [ All, DEV, SIT, UAT, MO, Training, PPE, NFT, DR ]
-- name: dryRun
-  type: boolean
-  default: true
-```
-When you click **Run pipeline**, these show up as dropdowns and a tick box.
-
-- **action**
-  - `Auto` is for the schedule, which decides stop or start from its name.
-  - `Stop` or `Start` are for manual runs, e.g. a developer needs DEV at 21:00.
-- **environment** runs for all enabled environments or just one.
-- **dryRun**: when ticked, the script only **logs** what it would do and changes nothing.
-
-**Scheduled runs always use the defaults**: Auto, All, and dryRun **true**. So until you change `default: true` to `false`, even the scheduled runs are only practice runs. That's deliberate, for safety while testing.
-
-## 5. Variables
-
-```yaml
-variables:
-  serviceConnection: 'REPLACE-WITH-YOUR-EXISTING-SERVICE-CONNECTION-NAME'
-```
-This is the name of the service connection your Bicep pipelines already use. It's set once here and used further down.
-
-## 6. Pool (which machine runs it)
-
-```yaml
-pool:
-  vmImage: ubuntu-latest
-```
-This is a Microsoft-hosted Linux build machine. It comes with Azure CLI and PowerShell already installed. If your project uses your own agents (check what your Bicep pipelines use), replace it with:
-```yaml
-pool:
-  name: your-agent-pool-name
+Hi Neal,
+
+I'm , a Cloud/DevOps engineer at Cognizant supporting the VOA/NDR programme.  and  suggested I reach out to you.
+
+We're trying to work out where some of our config still references the legacy domain controllers. The VMs we've checked in C190VOA authenticate against P058CLOsvrHMC01 (10.186.255.139), which Sam confirmed is one of the new Azure DCs, but we'd like to trace where else the legacy DCs might still be referenced.
+
+Would you have 30 minutes this week for a quick call to go through it? Happy to work around your diary.
+
+Thanks,
+
+
+
+
+Domain Controllers, DNS & Azure Networking — Study Guide for the Neal Riley Call
+
+Quick brief
+The goal of the call is to find where C190VOA config still points at the legacy domain controllers, and leave with named owners and next steps.
+The VMs we checked authenticate against a new Azure DC, so DC discovery itself looks healthy. Sam Hagger suspects something else in the configuration still references the old DCs. Neal Riley (networks) owns the network side — DNS servers, forwarders, VNet settings, firewall rules — which is the most likely place for an old reference to sit.
+What a good outcome looks like:
+• Neal confirms what ,  and  are and where they forward to.
+• You agree a list of places to check (see the legacy checklist below) and who checks each.
+• You understand how the SHIR VM (10.) fits in, given it is not domain joined.
+• A follow-up date is agreed and you report back to Helen.
+Our findings so far
+One VM is domain joined and uses a new Azure DC; the other (SHIR) is not domain joined at all.
+Item
+VM 
+VM 
+Hostname
+VOSDEVESRPORT02
+C190VOAsvradfir (SHIR)
+Resource group
+—
+C190VOArgpBSTDataDev
+OS
+Windows Server 2022 (build 20348)
+Not checked
+Domain
+USERDOMAIN01.DOMROOT.INTERNAL
+Not domain joined
+DC in use
+P058CLOsvrHMC01 
+None
+DNS servers
+
+Not checked
+AD site
+AZUREUKSOUTH
+—
+RDP with domain account
+Works
+Fails (NLA: DC cannot be contacted)
+What the evidence means:
+• P058CLOsvrHMC01 is new. Sam confirmed it is one of the new Azure DCs. Its nltest flags (DS_10, KEYLIST) mean Server 2016 or later, and it holds the PDC emulator role.
+• The DNS servers are not the DC. The VM asks  for DNS, yet authenticates to . So those three are likely resolvers or forwarders (a firewall DNS proxy, a Private DNS Resolver, or DNS servers in the hub). Where they forward to is the key question for Neal.
+• Reverse DNS is missing for 10.186.129.166. nslookup returned "Server: UnKnown" and "Server failed", meaning no PTR record. Not harmful, but worth mentioning.
+• The SHIR VM is standalone. It cannot validate domain logins, so it would not be using any DC — legacy or new — unless an application on it references one directly.
+Open question: which other services, VMs or settings did Helen and Sam see referencing the legacy DCs?
+Active Directory fundamentals
+Active Directory (AD DS) is the directory that holds users, computers and groups, and domain controllers are the servers that run it.
+The structure, using our names:
+• Forest — the top-level security boundary. Ours is DOMROOT.INTERNAL. All domains in a forest trust each other automatically.
+• Domain — a container for users and computers with shared policies. DOMROOT.INTERNAL is the forest root domain.
+• Child domain — a domain under another in the same namespace. USERDOMAIN01.DOMROOT.INTERNAL is a child of DOMROOT.INTERNAL.
+• OU (Organisational Unit) — a folder inside a domain used to group objects and apply Group Policy.
+• Computer object — the record a VM gets in AD when it is domain joined. No object = not joined.
+Domain controllers and their roles:
+• Domain Controller (DC) — a server holding a copy of the AD database, answering logons and lookups. DCs replicate changes to each other.
+• Writable DC vs RODC — most DCs are writable; a Read-Only DC holds a copy that cannot be changed locally, used in less secure locations.
+• Global Catalog (GC) — a DC that also holds a partial copy of every domain in the forest, used for forest-wide searches and logons. P058CLOsvrHMC01 is a GC.
+• KDC (Key Distribution Center) — the Kerberos service on every DC that issues tickets.
+• FSMO roles (Flexible Single Master Operations) — five jobs only one DC can do at a time:
+    ◦ Schema Master and Domain Naming Master — one per forest.
+    ◦ PDC Emulator — per domain; time source, password changes, account lockouts. P058CLOsvrHMC01 holds this for USERDOMAIN01.
+    ◦ RID Master — per domain; hands out ID pools for new objects.
+    ◦ Infrastructure Master — per domain; tracks cross-domain references.
+Sites and levels:
+• AD Site — a group of well-connected subnets. Clients prefer a DC in their own site. Both our VM and DC are in AZUREUKSOUTH.
+• Subnet-to-site mapping — tells AD which subnet belongs to which site. A missing mapping can send clients to a distant or legacy DC.
+• Functional level — the feature level of a domain or forest, capped by its oldest DC OS. Retiring legacy DCs often lets it be raised.
+• DC decommissioning (demotion) — removing the DC role properly, which cleans its DNS records and metadata. A DC switched off without demotion leaves stale records behind.
+What "legacy DC" usually means: a DC on an old OS (2008/2012 R2), or DCs in the old on-premises datacentre being retired in favour of Azure DCs. Clarify which one Sam means.
+DNS and how AD depends on it
+AD cannot work without DNS: clients find DCs by asking DNS, so a legacy DC reference very often lives in DNS.
+How a VM finds its DC:
+1. The VM reads its DNS server list (from the NIC or the VNet).
+2. It asks those servers for SRV records such as _ldap._tcp.dc._msdcs.USERDOMAIN01.DOMROOT.INTERNAL.
+3. DNS returns the list of DCs registered for the domain, preferring those in the VM's AD site.
+4. The VM contacts a DC (the DC Locator process) and caches it. nltest /dsgetdc shows the result.
+Record types to know:
+• A record — name to IPv4 address.
+• PTR record — IP back to name (reverse lookup). Missing for 10.186.129.166.
+• SRV record — advertises a service (LDAP, Kerberos, GC) and which servers provide it. DCs register these automatically via Netlogon.
+• CNAME — an alias pointing one name at another.
+• SOA / NS — say which servers are authoritative for a zone.
+Zones and forwarding:
+• Zone — the set of records a DNS server is responsible for, e.g. DOMROOT.INTERNAL.
+• AD-integrated zone — a zone stored in AD and replicated between DCs. Stale DC records survive here if a DC was not demoted cleanly.
+• _msdcs zone — the forest-wide zone holding DC locator records. A key place to look for legacy DC entries.
+• Forwarder — where a DNS server sends queries it cannot answer itself.
+• Conditional forwarder — "send queries for this domain to these IPs". If it still lists legacy DC IPs, lookups go to old servers.
+• Recursive vs authoritative — a resolver chases the answer for you; an authoritative server owns the zone.
+• Scavenging — automatic cleanup of stale dynamic records.
+• TTL — how long an answer is cached before being asked again.
+Azure-specific DNS:
+• 168.63.129.16 — Azure's built-in platform IP: DHCP, Azure-provided DNS and health probes. Seen as our VM's DHCP server; normal.
+• reddog.microsoft.com — Azure's default DNS suffix on VMs. Normal.
+• Custom DNS servers — set on the VNet or NIC to point VMs at your own DNS (DCs or resolvers) instead of Azure DNS. Ours point at the three .166 addresses.
+• Azure Private DNS Resolver — managed service with inbound and outbound endpoints and forwarding rulesets. Rulesets can hold conditional forwards to DC IPs.
+• Azure Private DNS zones — zones for private names, e.g. privatelink zones for Private Endpoints.
+• Azure Firewall DNS proxy — the firewall acts as the DNS server for VMs and forwards on to configured servers.
+Likely question for Neal: are the .166 addresses resolvers, firewall DNS proxies or DCs, and do they or their forwarding rules still send queries to legacy DC IPs?
+Azure networking
+Neal will think in terms of VNets, routes, firewalls and DNS settings; these are the terms he is likely to use.
+Building blocks:
+• VNet (Virtual Network) — a private network in Azure with an address space, e.g. 10.186.0.0/16.
+• Subnet — a slice of a VNet. Our VM is in 10.186.29.0/24 (mask 255.255.255.0, gateway 10.186.29.1).
+• CIDR notation — /24 = 256 addresses, /16 = 65,536. Azure reserves 5 addresses per subnet.
+• NIC (Network Interface) — the VM's network card in Azure; holds the private IP and optionally its own DNS servers.
+• Private IP / static vs dynamic — DCs should have static private IPs so DNS settings stay valid.
+Topology:
+• Hub-and-spoke — a central hub VNet with shared services (firewall, DNS, DCs, gateways); spoke VNets for workloads peer to it.
+• Landing zone — the standard, governed Azure environment (subscriptions, policies, networking) workloads deploy into.
+• VNet peering — connects two VNets privately. Not transitive: spoke A cannot reach spoke B through the hub without routing via a firewall or NVA.
+• Gateway transit — lets spokes use the hub's VPN/ExpressRoute gateway.
+• ExpressRoute / Site-to-site VPN — private links to on-premises; how Azure VMs would reach legacy on-prem DCs.
+Traffic control:
+• NSG (Network Security Group) — allow/deny rules on a subnet or NIC by IP, port and protocol.
+• UDR (User-Defined Route) / route table — overrides default routing, e.g. sends 0.0.0.0/0 to the firewall.
+• Azure Firewall / NVA — central firewall inspecting traffic between spokes and to on-prem. Firewall rules or DNS proxy settings can still name legacy DC IPs.
+• ASG (Application Security Group) — groups NICs so NSG rules can refer to roles, not IPs.
+• Private Endpoint — a private IP for a PaaS service inside your VNet.
+DNS settings in Azure (where old IPs hide):
+• VNet DNS servers — apply to every VM in the VNet. Portal: VNet → Settings → DNS servers.
+• NIC DNS servers — override the VNet setting for one VM. Portal: NIC → DNS servers.
+• A change to VNet DNS only reaches a VM after a DHCP renewal or reboot, so VMs can run on old settings for a long time.
+Ports AD needs (DC traffic):
+Service
+Port
+DNS
+53 TCP/UDP
+Kerberos
+88 TCP/UDP
+RPC endpoint mapper
+135 TCP
+LDAP
+389 TCP/UDP
+SMB (SYSVOL, Group Policy)
+445 TCP
+Kerberos password change
+464 TCP/UDP
+LDAPS
+636 TCP
+Global Catalog
+3268 / 3269 TCP
+RPC dynamic range
+49152–65535 TCP
+RDP
+3389 TCP
+If these are blocked between a VM and its DC, domain logon and NLA fail.
+Authentication and access
+These terms explain why your RDP worked on one VM and failed on the SHIR VM.
+• Domain join — adding a computer to a domain: it gets a computer object and a machine password, and starts trusting the domain's DCs.
+• Workgroup / standalone — a machine not in any domain; only its local accounts can log on. The SHIR VM behaves like this.
+• Secure channel — the trusted link between a joined computer and the domain, using the machine password. Check with nltest /sc_query:<domain>. A broken channel gives "trust relationship failed" errors.
+• Kerberos — the default domain authentication protocol. The client gets a ticket from the KDC and presents it to the server. Needs DNS names and time within 5 minutes.
+• NTLM — older challenge/response protocol, used when Kerberos is not possible (e.g. connecting by IP). Being phased out for security.
+• NLA (Network Level Authentication) — RDP checks your credentials before opening the session. It needs to reach a DC for domain accounts, which is why the SHIR VM rejected you.
+• CredSSP — the protocol RDP uses to pass credentials securely for NLA.
+• GPO (Group Policy Object) — settings pushed from AD to joined machines, e.g. adding your team's group to Remote Desktop Users. This is how you normally get RDP access.
+• Restricted Groups / Group Policy Preferences — GPO features that control local group membership.
+• Local admin account — the built-in account created at VM deployment; works without a domain. Log on as .\username.
+• LAPS (Local Administrator Password Solution) — rotates local admin passwords and stores them in AD or Entra ID.
+• Service account / gMSA — accounts applications run as. A gMSA (group Managed Service Account) has a password AD rotates automatically.
+• LDAP bind — an application authenticating to a DC to read the directory. Apps often hard-code a DC name or IP for this — a classic legacy reference.
+• Entra ID (formerly Azure AD) — Microsoft's cloud identity service. Different from AD DS: Azure portal logins use Entra ID; VM domain logons use AD DS.
+• Entra Connect — syncs AD users into Entra ID.
+• Entra Domain Services — Microsoft-managed AD DS in Azure (not what we have; ours are self-managed DC VMs).
+• Time sync (W32Time) — DCs sync time from the PDC emulator; Kerberos breaks if clocks drift.
+Where legacy DC references hide
+Old DC references usually survive in DNS settings and in application config, not in the DC Locator result itself. Use this as a shared checklist on the call.
+Azure network and DNS (Neal's area):
+[ ] VNet DNS server settings for the C190VOA VNets
+[ ] NIC-level DNS overrides on individual VMs
+[ ] What 10.186.129.166 / .130.166 / .131.166 are, and where they forward
+[ ] Private DNS Resolver forwarding rulesets (conditional forwards to old DC IPs)
+[ ] Azure Firewall DNS proxy upstream servers
+[ ] Firewall rules, NSGs and route tables still allowing traffic to old DC IPs (traffic logs show who still talks to them)
+AD and DNS (AD / identity team):
+[ ] Conditional forwarders and server forwarders on the DCs/DNS servers
+[ ] Stale SRV, A and NS records for old DCs in the _msdcs and domain zones
+[ ] AD Sites and Services: subnet-to-site mappings and site links pointing clients at legacy sites
+[ ] DCs switched off without demotion (metadata cleanup needed)
+[ ] Trusts that reference old DCs
+Servers and applications (workload owners):
+[ ] Static DNS configured inside a VM's OS instead of via Azure
+[ ] Hard-coded DC names or IPs in app config, connection strings, LDAP binds
+[ ] hosts files (C:\Windows\System32\drivers\etc\hosts)
+[ ] Time sources (NTP) set to an old DC
+[ ] Scripts, scheduled tasks and pipeline variables using old DC names
+[ ] SHIR VM: any linked services, credentials or file shares that authenticate to a domain
+IaC and pipelines (your area):
+[ ] Bicep parameters for dnsServers on VNets/NICs
+[ ] Domain-join extension settings (domain name, OU, DC)
+[ ] Pipeline variable groups and Key Vault secrets holding DC names or IPs
+A quick search of the repo for the old DC IPs or hostnames often finds IaC references in minutes.
+Diagnostic commands cheat sheet
+Run these on a domain-joined VM (Command Prompt or PowerShell), or via Azure Run Command when you cannot RDP. Note: "nltest" and "ldap" use a lowercase L.
+Command
+What it tells you
+ipconfig /all
+DNS servers, domain suffix, IP, gateway
+nltest /dsgetdc:USERDOMAIN01.DOMROOT.INTERNAL
+Which DC the VM uses, its site and flags
+nltest /dclist:USERDOMAIN01.DOMROOT.INTERNAL
+Every DC in the domain
+nltest /sc_query:USERDOMAIN01.DOMROOT.INTERNAL
+Health of the secure channel
+nltest /dsgetsite
+The VM's AD site
+echo %LOGONSERVER%
+DC that logged the current user on
+nslookup -type=SRV _ldap._tcp.dc._msdcs.USERDOMAIN01.DOMROOT.INTERNAL
+DCs advertised in DNS (look for old ones)
+nslookup USERDOMAIN01.DOMROOT.INTERNAL
+IPs registered for the domain name
+nslookup <name> <dns-server-ip>
+Ask one specific DNS server
+Test-NetConnection 10.186.255.139 -Port 389
+Whether a DC port is reachable
+Resolve-DnsName <name> -Server <ip>
+PowerShell DNS lookup against one server
+Get-DnsClientServerAddress
+DNS servers per adapter
+w32tm /query /source
+Where the VM gets its time
+(Get-WmiObject Win32_ComputerSystem).Domain
+Domain or WORKGROUP the VM is in
+Azure side:
+az network vnet show -g <rg> -n <vnet> --query "dhcpOptions.dnsServers"
+az network nic show -g <rg> -n <nic> --query "dnsSettings.dnsServers"
+List every DC with its OS (from a domain-joined VM, no extra modules):
+([adsisearcher]"(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))").FindAll() |
+  % { "{0}  {1}" -f $_.Properties.name[0], $_.Properties.operatingsystem[0] }
+Questions to ask Neal
+Ask the DNS questions first; they are the most likely to find the legacy reference.
+DNS path:
+1. What are 10., 10.1.166 and 10..166 — DCs, a Private DNS Resolver, firewall DNS proxies, or something else?
+2. Where do they forward queries for DOMROOT.INTERNAL and USERDOMAIN01.DOMROOT.INTERNAL?
+3. Are there conditional forwarders or resolver rulesets that still list legacy DC IPs?
+4. Is the DNS server list set at VNet level for C190VOA, or do some VMs override it on the NIC?
+Legacy DCs:
+5. Which IPs or hostnames are the legacy DCs, so we can search config and logs for them?
+6. Are the legacy DCs on-premises (reached over ExpressRoute/VPN) or in Azure?
+7. Is there a planned date to switch them off?
+Traffic and evidence:
+8. Can firewall or NSG flow logs show which sources in C190VOA still talk to legacy DC IPs on ports 53, 88 or 389?
+9. Are there firewall rules or route tables that exist only for the legacy DCs?
+Ownership:
+10. Who owns AD DNS zones and Sites and Services — your team or an identity/AD team?
+11. Who else should be on a follow-up call?
+About the SHIR VM:
+12. Should the SHIR VM be domain joined, or is standalone the intended design for C190VOA?
+Running the call
+Lead with evidence, ask focused questions, and close with owners and dates — that is what makes you stand out.
+Suggested flow (30 minutes):
+1. Intro (2 min) — who you are, that Helen and Sam asked you to reach out, and the goal: find where config still references the legacy DCs.
+2. What we found (5 min) — walk through the findings table: VM, DC, DNS servers, SHIR not joined.
+3. Neal's view (15 min) — ask the DNS questions first, then legacy DCs and traffic logs. Let him talk; take notes.
+4. Agree actions (5 min) — go through the checklist and assign owners.
+5. Close (3 min) — recap actions, agree a follow-up date, say you will update Helen and Sam.
+Phrases that land well:
+• "DC discovery returns P058CLOsvrHMC01, which Sam confirmed is a new Azure DC, so the locator side looks fine."
+• "The DNS servers on the VM are the .166 addresses, not the DC itself, so I'd like to understand what sits behind them."
+• "Is the DNS set at VNet level, or are there NIC-level overrides?"
+• "Do any conditional forwarders or resolver rules still point at the legacy DC IPs?"
+• "Could flow logs show which hosts still talk to the old DCs on 53, 88 or 389?"
+• "The SHIR VM isn't domain joined — NLA fails with domain credentials — so I want to confirm whether that's by design."
+• "I can check our Bicep and pipeline variables for any hard-coded DNS or DC values."
+Habits that help:
+• Say "I don't know, I'll check and come back to you" rather than guessing — it builds trust.
+• Repeat back what you heard: "So the .166 addresses are the firewall DNS proxy forwarding to… is that right?"
+• Ask permission to record or share notes, then send a short summary the same day.
+Follow-up note template:
+Thanks for your time, Neal. Summary: [what the .166 servers are / where they forward]. Actions: [owner – action – date]. Next check-in: [date]. I'll update Helen and Sam.
+Glossary A–Z
+Term
+Meaning
+A record
+DNS record mapping a name to an IPv4 address
+AD DS
+Active Directory Domain Services — the on-prem-style directory run by DCs
+AD Site
+Group of subnets with good connectivity; clients prefer DCs in their site
+ASG
+Application Security Group — groups NICs for NSG rules
+Azure Firewall
+Managed central firewall; can act as a DNS proxy
+CIDR
+Address range notation, e.g. 10.186.29.0/24
+Conditional forwarder
+DNS rule sending queries for one domain to specific servers
+CredSSP
+Protocol RDP uses to pass credentials for NLA
+DC
+Domain Controller — server running AD DS
+DC Locator
+Process a client uses to find a DC via DNS SRV records
+Demotion
+Properly removing the DC role from a server
+DHCP
+Hands out IPs and settings; in Azure via 168.63.129.16
+Domain join
+Adding a computer to a domain
+Entra ID
+Microsoft's cloud identity service (formerly Azure AD)
+ExpressRoute
+Private dedicated link between Azure and on-premises
+Forest
+Top-level AD boundary; ours is DOMROOT.INTERNAL
+Forwarder
+Server a DNS server sends unresolved queries to
+FSMO
+Five single-holder AD roles (Schema, Domain Naming, PDC, RID, Infrastructure)
+GC
+Global Catalog — DC holding a partial copy of the whole forest
+gMSA
+Group Managed Service Account with auto-rotated password
+GPO
+Group Policy Object — settings pushed to joined machines
+Hub-and-spoke
+Central shared VNet with workload VNets peered to it
+KDC
+Kerberos Key Distribution Center, runs on every DC
+Kerberos
+Default domain authentication protocol using tickets
+LAPS
+Rotates and stores local admin passwords
+LDAP / LDAPS
+Protocol to query AD (389) / encrypted version (636)
+Metadata cleanup
+Removing leftover objects of a DC that was not demoted
+NIC
+Network interface of an Azure VM
+NLA
+RDP pre-authentication that needs a DC for domain accounts
+nltest
+Windows tool for DC discovery and secure channel checks
+NSG
+Network Security Group — allow/deny rules
+NTLM
+Older authentication protocol, fallback to Kerberos
+NVA
+Network Virtual Appliance — third-party firewall/router VM
+OU
+Organisational Unit — folder in AD for grouping and GPOs
+PDC Emulator
+FSMO role for time, passwords and lockouts
+Peering
+Private link between two VNets (not transitive)
+Private DNS Resolver
+Azure managed DNS forwarding service
+Private Endpoint
+Private IP for an Azure PaaS service
+PTR record
+Reverse DNS: IP to name
+Replication
+DCs copying changes to each other
+RODC
+Read-Only Domain Controller
+Run Command
+Azure feature to run scripts inside a VM without RDP
+Scavenging
+Automatic cleanup of stale DNS records
+Secure channel
+Trusted link between a joined computer and its domain
+SHIR
+Self-Hosted Integration Runtime — Data Factory agent on a VM
+SRV record
+DNS record advertising a service such as LDAP or Kerberos
+Subnet
+Slice of a VNet's address space
+Trust
+Relationship letting one domain accept another's users
+TTL
+How long a DNS answer is cached
+UDR
+User-Defined Route — custom routing in Azure
+VNet
+Azure Virtual Network
+Workgroup
+Non-domain mode; local accounts only
+_msdcs
+Forest-wide DNS zone holding DC locator records
+
+
+
+
+
+
+
+
+
+
+Yes, Cynthia. **To become confident in these discussions, you need to understand how identity, DNS, networking and application configuration work together—and what each check actually proves.** Knowing that will help you ask useful questions and explain your findings clearly.
+
+Use your current investigation as a real example. Below is a study guide you can work through over four weeks, with practical Windows checks and language you can use with your team.
+
+**1. Start with the five questions behind most investigations**
+
+When someone says, “This VM is using an old server,” separate the issue into these questions:
+
+| Question                                             | Area being investigated   |
+| ---------------------------------------------------- | ------------------------- |
+| Where is the VM, and can it reach the destination?   | Networking                |
+| How does it find the destination’s IP address?       | DNS                       |
+| How does it prove its identity?                      | Authentication            |
+| What is it allowed to access?                        | Authorisation             |
+| Which destination does the application actually use? | Application configuration |
+
+**Example:** A VM might discover a new domain controller correctly, while an application on that VM still has an old LDAP server name in its configuration.
+
+That is why Sam wants to understand the service configuration. Your successful domain controller discovery answers one question; it does not answer every question about the application.
+
+---
+
+**2. Understand domains and Active Directory**
+
+Think of a company with employees, computers, shared resources and access rules. **Active Directory Domain Services—AD DS—stores and manages information about those users, computers and groups.** Domain controllers run this service. ([Microsoft Learn][1])
+
+| Term                       | Plain English                                                                           | Example or relevance                                |
+| -------------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| **AD DS**                  | The directory system for managing Windows identities and computers                      | Holds user accounts, computer accounts and groups   |
+| **Domain**                 | A logical group of identities and computers managed together                            | `USERDOMAIN01.DOMROOT.INTERNAL`                     |
+| **Domain controller—DC**   | A server providing the domain’s directory and authentication services                   | Sam confirmed `10.186.255.139` is a new Azure DC    |
+| **Domain joined**          | A computer has a computer account and a trust relationship with the domain              | A company VM can use domain accounts and policies   |
+| **Member server**          | A domain-joined server that is not itself a DC                                          | An application server                               |
+| **Workgroup**              | Computers managed without an AD domain membership                                       | Accounts are usually managed locally                |
+| **Local account**          | An account belonging to one computer                                                    | `.\username`                                        |
+| **Domain account**         | An account belonging to the domain                                                      | `DOMAIN\username`                                   |
+| **Forest**                 | The top-level AD structure containing one or more domains                               | Your output showed `DOMROOT.INTERNAL` as the forest |
+| **Organisational Unit—OU** | A container used to organise AD objects and delegate administration                     | An OU for development servers                       |
+| **Group Policy—GPO**       | Centrally managed settings for users and computers                                      | Password, firewall or security settings             |
+| **Trust**                  | A relationship that can allow identities from another domain or forest to be recognised | Access across organisational domains                |
+
+**Important distinction:** A VM running in Azure is not automatically domain joined. Azure tells you where it is hosted; domain membership tells you how Windows identity is managed.
+
+Also, a computer does not permanently “join a particular DC”. It joins a **domain** and can use suitable DCs within that domain.
+
+**How to check membership**
+
+Open PowerShell:
+
+```powershell
+Get-CimInstance Win32_ComputerSystem |
+    Select-Object Name, Domain, PartOfDomain
 ```
 
-## 7. The job
+Interpretation:
 
-```yaml
-jobs:
-- job: EnvScheduler
-  displayName: ${{ parameters.action }} - ${{ parameters.environment }}
-  timeoutInMinutes: 90
+* `Name`: which computer you checked.
+* `PartOfDomain = True`: joined to an AD domain.
+* `Domain`: domain name; for a non-domain-joined machine, this can show its workgroup.
+
+This queries Windows computer information. ([Microsoft Learn][2])
+
+A GUI alternative is **Win + R → `sysdm.cpl` → Computer Name**. Read the domain or workgroup information without changing it.
+
+---
+
+**3. Separate AD DS from Microsoft Entra ID**
+
+These names frequently cause confusion.
+
+| Technology                          | Main purpose                                                                                     |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------ |
+| **AD DS**                           | Traditional Windows domains, domain join, Group Policy, Kerberos and LDAP                        |
+| **Microsoft Entra ID**              | Cloud identity for services such as Microsoft 365, Azure and modern applications                 |
+| **Microsoft Entra Domain Services** | A Microsoft-managed domain service providing capabilities such as domain join, LDAP and Kerberos |
+
+Microsoft Entra ID was previously called **Azure Active Directory**. It is a different service from Windows Server Active Directory, although organisations can integrate them. ([Microsoft Learn][3])
+
+Useful questions:
+
+> “When you say domain joined, do you mean AD domain joined, Entra joined or hybrid joined?”
+
+> “Is this a Windows domain account, an application identity or a managed identity?”
+
+**Managed identity** means an Azure-managed identity a workload can use to access supported services. Giving a VM a managed identity does not join Windows to an AD domain.
+
+---
+
+**4. Understand DNS—the system that finds names**
+
+**DNS means Domain Name System.** It helps translate names into addresses and find services.
+
+For example:
+
+```text
+app01.example.internal → 10.20.30.40
 ```
-- A **job** is a group of steps that run on one machine.
-- `displayName` shows in the run history as e.g. "Stop - DEV", so you can tell runs apart.
-- `timeoutInMinutes: 90` stops the job if it gets stuck. SQL Managed Instances can take a while to stop.
 
-## 8. Steps (what actually happens)
+You use a memorable name; the network uses an IP address.
 
-**Step 1: get the code**
-```yaml
-  - checkout: self
+| Term                      | Meaning                                                         |
+| ------------------------- | --------------------------------------------------------------- |
+| **Hostname**              | A computer’s short name, such as `app01`                        |
+| **FQDN**                  | Fully qualified domain name, such as `app01.example.internal`   |
+| **DNS suffix**            | A name added to a short hostname during resolution              |
+| **DNS server / resolver** | The server that answers or obtains answers to DNS queries       |
+| **DNS zone**              | A managed collection of DNS records                             |
+| **A record**              | Maps a name to an IPv4 address                                  |
+| **AAAA record**           | Maps a name to an IPv6 address                                  |
+| **PTR record**            | Maps an IP address back to a name                               |
+| **CNAME record**          | Makes one DNS name an alias of another                          |
+| **SRV record**            | Identifies servers providing a particular service               |
+| **TTL**                   | How long a DNS answer can be cached                             |
+| **Forwarder**             | Sends queries to another DNS server                             |
+| **Conditional forwarder** | Sends queries for a particular domain to designated DNS servers |
+| **Authoritative server**  | Holds the official DNS data for a zone                          |
+| **Stale record**          | A record that no longer matches the intended configuration      |
+
+**Forward lookup:** “What IP address belongs to this name?”
+
+**Reverse lookup:** “What name belongs to this IP address?”
+
+Your command:
+
+```cmd
+nslookup 10.186.129.166
 ```
-This downloads your repo onto the build machine, so the script and `environments.json` are there to use.
 
-**Step 2: log in to Azure and run the script**
-```yaml
-  - task: AzureCLI@2
-    inputs:
-      azureSubscription: ${{ variables.serviceConnection }}
-      scriptType: pscore
-      scriptLocation: scriptPath
-      scriptPath: pipelines/env-scheduler/scripts/Invoke-EnvScheduler.ps1
-      arguments: >-
-        -Action ${{ parameters.action }}
-        -Environment ${{ parameters.environment }}
-        -DryRun ${{ parameters.dryRun }}
-        -ConfigPath $(Build.SourcesDirectory)/pipelines/env-scheduler/config/environments.json
-        -ReportDir $(Build.ArtifactStagingDirectory)/report
+was a reverse lookup. It did not test every function of that DNS server. Microsoft documents `nslookup` as a DNS query tool, including name lookups for IP addresses. ([Microsoft Learn][4])
+
+**Why DNS matters to domains**
+
+Windows uses DNS service records to locate suitable domain controllers. DNS problems can therefore look like login or domain problems. ([Microsoft Learn][5])
+
+A domain controller can also run DNS, but these are **two separate roles**. A DNS server is not necessarily a domain controller.
+
+---
+
+**5. Understand how Windows finds a domain controller**
+
+A simplified sequence is:
+
+1. Windows needs a domain service.
+2. DC Locator uses DNS records to find suitable DCs.
+3. AD site information helps it select an appropriate DC.
+4. Windows communicates with that DC for the required operation.
+
+DCs publish SRV records describing services and site information. ([Microsoft Learn][6])
+
+Useful terms:
+
+| Term                  | Meaning                                                                       |
+| --------------------- | ----------------------------------------------------------------------------- |
+| **DC Locator**        | Windows mechanism for finding a suitable domain controller                    |
+| **Netlogon**          | Windows service involved in DC discovery and domain secure-channel operations |
+| **AD site**           | A logical representation of network locality                                  |
+| **AD subnet mapping** | Associates an IP subnet with an AD site                                       |
+| **Secure channel**    | Trusted communication relationship between a domain member and the domain     |
+| **Replication**       | Synchronising directory changes between DCs                                   |
+| **Global Catalog—GC** | A directory service supporting forest-wide searches                           |
+| **FSMO roles**        | Special AD responsibilities assigned to particular DCs                        |
+| **PDC emulator**      | One FSMO role, relevant to functions including time and password handling     |
+
+An **AD site is not the same thing as an Azure region**. Your site is named `AZUREUKSOUTH`, but its membership depends on AD configuration.
+
+Your discovery command:
+
+```cmd
+nltest /dsgetdc:USERDOMAIN01.DOMROOT.INTERNAL
 ```
-- `AzureCLI@2` is the same task type many Bicep pipelines use. It **logs in to Azure** with your service connection, then runs your script.
-- `scriptType: pscore` means the script is PowerShell (version 7).
-- `scriptPath` is where the script lives in your repo.
-- `arguments` passes your choices into the script:
-  - `-Action`, `-Environment` and `-DryRun` come from the parameters (section 4).
-  - `-ConfigPath` tells it where `environments.json` is.
-  - `-ReportDir` is the folder where it saves the CSV report.
 
-`${{ ... }}` means "fill in a parameter value". `$(...)` means "fill in an Azure DevOps built-in value", such as the folder where the repo was downloaded.
+**What it proves:** Windows returned a DC for the domain you specified.
 
-**Step 3: save the report**
-```yaml
-  - task: PublishPipelineArtifact@1
-    condition: always()
-    inputs:
-      targetPath: $(Build.ArtifactStagingDirectory)/report
-      artifact: env-scheduler-report-$(System.JobAttempt)
+**What it does not prove:** domain membership, every application’s authentication destination, or the absence of legacy dependencies.
+
+---
+
+**6. Learn networking from the VM outwards**
+
+Imagine sending a parcel:
+
+* IP address: destination address.
+* Subnet: local neighbourhood.
+* Route: instructions for reaching the destination.
+* Gateway: next stop when leaving the local network.
+* Firewall: checks whether the traffic is permitted.
+* Port: the particular service entrance.
+
+| Term                   | Plain English                                                                               |
+| ---------------------- | ------------------------------------------------------------------------------------------- |
+| **IP address**         | Address used to communicate with a network interface                                        |
+| **Private IP**         | An address used within private networks; it is not directly routable on the public internet |
+| **Public IP**          | An internet-routable address                                                                |
+| **NIC**                | Network Interface Card; a VM’s network connection                                           |
+| **Subnet**             | A smaller address range within a network                                                    |
+| **Subnet mask / CIDR** | Describes the network portion of an address                                                 |
+| **Default gateway**    | Next hop normally used for destinations without a more specific route                       |
+| **Route table**        | Rules describing where traffic should go                                                    |
+| **TCP**                | Transport protocol providing an ordered, reliable connection                                |
+| **UDP**                | Transport protocol without TCP’s connection and delivery guarantees                         |
+| **Port**               | Number identifying a service endpoint                                                       |
+| **ICMP**               | Protocol used by tools such as ping                                                         |
+| **Latency**            | Time taken for communication                                                                |
+| **Packet loss**        | Traffic that fails to arrive                                                                |
+| **NAT**                | Translation of network addresses                                                            |
+| **Proxy**              | An intermediary that sends requests on a client’s behalf                                    |
+
+**Your subnet example**
+
+Your screenshot showed:
+
+```text
+IP:          10.186.29.87
+Subnet mask: 255.255.255.0
 ```
-- This uploads the CSV report so you can **download it from the run page**: Summary tab → "1 published".
-- `condition: always()` means do this even if the script failed, so you can still see what happened.
 
-## The whole flow
+That mask corresponds to `/24`, so the local subnet is `10.186.29.0/24`.
 
+`10.186.255.139` is outside that subnet. Communication needs routing between the networks.
+
+**Crucial distinction:** An IP address beginning with `10` does not mean the destination is local to the VM. You must examine the subnet mask and routes.
+
+---
+
+**7. Connect this to Azure networking**
+
+| Azure term                   | What it does                                                                    |
+| ---------------------------- | ------------------------------------------------------------------------------- |
+| **VNet**                     | An Azure virtual network                                                        |
+| **Subnet**                   | A subdivision of a VNet’s address space                                         |
+| **NSG**                      | Allows or denies network traffic using rules                                    |
+| **UDR**                      | A user-defined route controlling the traffic’s next hop                         |
+| **VNet peering**             | Connects VNets                                                                  |
+| **VPN Gateway**              | Provides encrypted network connectivity                                         |
+| **ExpressRoute**             | Provides private connectivity to Microsoft services                             |
+| **NVA**                      | A virtual appliance performing functions such as routing or firewall inspection |
+| **Hub and spoke**            | A design with shared network services in a hub and workloads in spokes          |
+| **Effective routes**         | The routes actually applicable to a VM’s NIC                                    |
+| **Effective security rules** | The combined security rules applicable to a NIC                                 |
+
+NSGs can apply at subnet and NIC level. If both apply, the traffic must be permitted through both applicable sets of rules. ([Microsoft Learn][7])
+
+**Resource group, subscription, VNet and domain are different things.**
+
+* Resource group: organises Azure resources.
+* Subscription: Azure management and billing scope.
+* VNet: network boundary and connectivity.
+* AD domain: identity management.
+
+Two VMs being in C190 does not establish that they share a subnet, DNS configuration, domain membership or application configuration.
+
+**Where to inspect DNS in Azure**
+
+* Open the **VNet → DNS servers**.
+* Open the VM’s **network interface → DNS servers**.
+* Compare those settings with `ipconfig /all` inside Windows.
+
+NIC-specific DNS settings override VNet DNS settings. Guest operating-system configuration also needs checking before concluding which settings the VM is actually using. ([Microsoft Learn][8])
+
+---
+
+**8. Understand private endpoints and hybrid DNS**
+
+This matters to your ADF, Key Vault, Storage and other Azure work.
+
+A **private endpoint** gives a supported service a private IP address in your VNet. DNS must resolve the service name to the appropriate private address for clients using that path. ([Microsoft Learn][9])
+
+Related terms:
+
+* **Private DNS zone:** DNS records used within private networking.
+* **VNet link:** connects a private DNS zone to a VNet for resolution.
+* **DNS Private Resolver:** Azure service supporting DNS resolution between Azure and other networks.
+* **Split DNS:** the same name can resolve differently depending on where the query is made.
+
+**Example:** A Key Vault private endpoint exists, but a VM still resolves the vault name to a public address.
+
+The right question is:
+
+> “Which DNS resolver answered, and did the service name resolve to the expected private IP?”
+
+The existence of a private endpoint alone does not prove the client uses it.
+
+---
+
+**9. Understand authentication and service configuration**
+
+| Term                      | Meaning                                                      | Why it comes up                                 |
+| ------------------------- | ------------------------------------------------------------ | ----------------------------------------------- |
+| **Authentication**        | Proving an identity                                          | “Is this user or service who it claims to be?”  |
+| **Authorisation**         | Checking permitted actions                                   | “Can this identity read the database?”          |
+| **Kerberos**              | Ticket-based authentication used in AD                       | Domain authentication                           |
+| **NTLM**                  | Another Windows authentication mechanism                     | Older or fallback authentication paths          |
+| **LDAP**                  | Protocol for accessing directory information                 | Applications searching AD                       |
+| **LDAPS**                 | LDAP protected using TLS                                     | Secure directory connections                    |
+| **Service account**       | Identity used by a service                                   | The identity running an application             |
+| **gMSA**                  | Group Managed Service Account with managed password handling | Supported Windows services                      |
+| **SPN**                   | Service Principal Name identifying a service for Kerberos    | Kerberos troubleshooting                        |
+| **TLS certificate**       | Helps protect connections and verify server identity         | LDAPS or HTTPS                                  |
+| **Hard-coded dependency** | A fixed server name or IP stored in configuration            | Applications still targeting old infrastructure |
+
+**A non-domain-joined VM can still have domain-related dependencies.**
+
+For example, an application on it might query LDAP using supplied credentials or use a domain account to access another service.
+
+So we should refine our earlier wording: **“Not domain joined” does not prove “no dependency on a domain controller”.**
+
+Possible legacy references include:
+
+* Application configuration files.
+* DNS aliases or service records.
+* Explicit LDAP URLs.
+* Windows service settings.
+* Scheduled tasks or scripts.
+* Registry settings.
+* DNS forwarders.
+* Cached records or connections.
+
+These are investigation possibilities, not confirmed causes in your environment.
+
+---
+
+**10. Learn the common ports**
+
+You do not need to memorise every port immediately. Start with these:
+
+| Service             |  Common destination port | Purpose                                      |
+| ------------------- | -----------------------: | -------------------------------------------- |
+| DNS                 |               TCP/UDP 53 | Name resolution                              |
+| Kerberos            |               TCP/UDP 88 | Authentication                               |
+| LDAP / DC discovery |              TCP/UDP 389 | Directory access and discovery functions     |
+| LDAPS               |                  TCP 636 | LDAP over TLS                                |
+| SMB                 |                  TCP 445 | File access and Windows domain functions     |
+| RPC endpoint mapper |                  TCP 135 | Locating RPC services                        |
+| Dynamic RPC         | Commonly TCP 49152–65535 | Various Windows/AD operations                |
+| Global Catalog      |          TCP 3268 / 3269 | Forest-wide directory queries; 3269 uses TLS |
+| NTP                 |                  UDP 123 | Time synchronisation                         |
+| HTTPS               |                  TCP 443 | Web/API communication                        |
+| RDP                 |    Commonly TCP/UDP 3389 | Remote desktop                               |
+
+Actual requirements depend on the operation and configuration. This is a learning reference, not a list of ports to open automatically. Microsoft provides detailed AD firewall requirements. ([Microsoft Learn][10])
+
+**Why time matters:** Kerberos authentication is sensitive to clock differences. A login issue can involve time synchronisation as well as credentials or networking.
+
+---
+
+**11. Practise these checks and understand their limits**
+
+Run these on a VM you are authorised to investigate. The examples inspect settings or make diagnostic queries; they do not repair configuration.
+
+**A. Identify the machine and your current identity**
+
+```cmd
+hostname
+whoami
+ipconfig /all
 ```
-19:00 UK (Mon–Fri)
-   │
-   ▼
-Schedule "Stop" fires
-   │
-   ▼
-Build machine starts → downloads your repo
-   │
-   ▼
-Logs in to Azure with your service connection
-   │
-   ▼
-Script reads environments.json
-   → checks UK time is right
-   → stops/scales the resources in your include list
-   → saves what it changed to blob storage
-   │
-   ▼
-CSV report published to the run page
 
-07:00 UK (Mon–Fri): same, but "Start", which restores everything it stopped
+Record the hostname, IP, subnet, gateway and DNS servers.
+
+**B. Confirm domain membership**
+
+```powershell
+Get-CimInstance Win32_ComputerSystem |
+    Select-Object Name, Domain, PartOfDomain
 ```
+
+**C. Discover a domain controller**
+
+```cmd
+nltest /dsgetdc:USERDOMAIN01.DOMROOT.INTERNAL
+```
+
+**D. Query domain service records**
+
+```cmd
+nslookup -type=SRV _ldap._tcp.dc._msdcs.USERDOMAIN01.DOMROOT.INTERNAL
+```
+
+This helps show the DC discovery records returned by DNS.
+
+**E. Compare DNS responses from a specific resolver**
+
+```cmd
+nslookup -type=SRV _ldap._tcp.dc._msdcs.USERDOMAIN01.DOMROOT.INTERNAL 10.186.129.166
+```
+
+The final address selects the DNS server to query. ([Microsoft Learn][11])
+
+**F. Test a TCP connection**
+
+```powershell
+Test-NetConnection 10.186.255.139 -Port 389
+```
+
+`TcpTestSucceeded = True` means the TCP connection succeeded. **It does not prove an LDAP bind or authentication succeeded**, and this command does not test UDP. ([Microsoft Learn][12])
+
+**G. Inspect routes**
+
+```cmd
+route print
+```
+
+This shows guest Windows routes. Azure effective routes provide additional information about the Azure network path.
+
+**Avoid these common conclusions**
+
+| Finding                   | Accurate interpretation                                                 |
+| ------------------------- | ----------------------------------------------------------------------- |
+| Ping succeeds             | ICMP communication succeeded                                            |
+| Ping fails                | ICMP failed; the destination or application may still be available      |
+| TCP port succeeds         | A TCP connection succeeded to that address and port                     |
+| DNS resolves              | DNS returned an answer; verify it is the intended answer                |
+| Reverse lookup fails      | The reverse lookup failed; forward lookup may still work                |
+| `nltest` returns a new DC | DC discovery returned that DC; applications may have other dependencies |
+| VM is not domain joined   | No AD machine membership; application dependencies still need checking  |
+
+---
+
+**12. Apply this to your actual investigation**
+
+Keep the evidence separated:
+
+| Finding                                         | Status                      |
+| ----------------------------------------------- | --------------------------- |
+| `10.186.29.87` is domain joined                 | You reported this           |
+| `10.186.28.52` is not domain joined             | You reported this           |
+| Discovery returned `10.186.255.139`             | Shown in your earlier check |
+| That address belongs to a new Azure DC          | Sam confirmed this          |
+| `10.186.29.87` has three configured DNS servers | Shown in your screenshot    |
+| Those DNS servers are legacy                    | Not yet established         |
+| An application still references an old DC       | Not yet established         |
+| Root cause                                      | Still under investigation   |
+
+**The next useful question is:**
+
+> “What evidence originally showed a legacy domain controller reference—an application log, a DNS response, a configuration entry or observed network traffic?”
+
+Then ask:
+
+> “Which service is involved, what identity does it run under, and does it discover domain controllers automatically or use an explicit LDAP endpoint?”
+
+Those questions target the uncertainty Sam described.
+
+---
+
+**13. Build a disciplined troubleshooting habit**
+
+Use this order:
+
+1. **Define the symptom:** what failed, when, and on which machine?
+2. **Identify the destination:** name, resolved IP, port and protocol.
+3. **Check DNS:** which resolver answered, and is the answer expected?
+4. **Check the network path:** routes, NSGs, firewalls and destination service.
+5. **Check identity:** machine membership, service identity and authentication.
+6. **Check configuration:** explicit endpoints, scripts, aliases and cached dependencies.
+7. **Compare with a working example:** what differs?
+8. **Report evidence and next action:** avoid declaring a cause before it is established.
+
+A good technical update sounds like:
+
+> “DC discovery returned the new Azure controller. The remaining question is whether the application has an explicit legacy endpoint. We need the original error or connection evidence and the service configuration to confirm that.”
+
+---
+
+**14. Study for four weeks, 30–45 minutes a day**
+
+| Week  | Focus                                                           | Practical outcome                      |
+| ----- | --------------------------------------------------------------- | -------------------------------------- |
+| **1** | AD domains, DCs, membership, accounts and Entra distinctions    | Explain how a VM’s identity is managed |
+| **2** | DNS records, suffixes, forward/reverse lookup and DC Locator    | Explain how the VM finds a service     |
+| **3** | IPs, CIDR, routes, ports, NSGs and hybrid connectivity          | Trace the communication path           |
+| **4** | Service identities, LDAP, Kerberos and dependency investigation | Present an evidence-based diagnosis    |
+
+For each topic, write five short answers:
+
+1. What does it mean?
+2. Why do we use it?
+3. Where is it configured?
+4. How do I check it?
+5. What does a successful check **not** prove?
+
+Start with these official resources:
+
+* [Active Directory overview](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/get-started/virtual-dc/active-directory-domain-services-overview)
+* [How Windows locates domain controllers](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/dc-locator)
+* [Troubleshooting DC discovery](https://learn.microsoft.com/en-us/troubleshoot/windows-server/windows-security/troubleshoot-domain-controller-location-issues)
+* [Azure DNS and name resolution](https://learn.microsoft.com/en-us/azure/virtual-network/virtual-networks-name-resolution-for-vms-and-role-instances)
+* [Azure Virtual Network overview](https://learn.microsoft.com/en-in/azure/virtual-network/virtual-networks-overview)
+* [AD network and firewall requirements](https://learn.microsoft.com/en-us/troubleshoot/windows-server/identity/config-firewall-for-ad-domains-and-trusts)
