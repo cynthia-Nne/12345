@@ -1,12 +1,22 @@
 
-Hi Neal,
+Hi Helen, just wanted to give you an update on the call with Neal and Brad.
 
-I’m , a Cloud/DevOps engineer at Cognizant supporting the VOA/NDR programme.  suggested I reach out to you.
+The call was quite informative, and we went through both VMs to understand the DNS configuration and where the references to the legacy domain controllers might be coming from.
 
-We’re investigating possible references to legacy domain controllers in the service configuration for two C190 VMs: 10.186.29.87 and 10.186.28.52.
+Neal first explained their domain controller infrastructure. He showed the older physical domain controllers, which use the IRD prefix, and said they have five remaining that they're looking to decommission. He also explained the older virtual controllers and the newer Azure-hosted domain controllers.
 
-The domain controller discovery check on 10.186.29.87 returned 10.186.255.139, which  confirmed is one of the new Azure domain controllers. The other VM, 10.186.28.52, is not domain joined. We’d appreciate your help understanding where any legacy references might be coming from.
+For **10.186.29.87**, we checked the DNS configuration directly on the server. Neal confirmed that the three DNS addresses I shared with you earlier are actually PowerDNS resolvers, rather than legacy domain controllers. These use conditional forwarding to resolve Active Directory requests.
 
-Could you help us investigate? I can share the screenshots and results from my checks.
+We also checked the Windows network adapter and confirmed there was no manual DNS override. The VM is obtaining its DNS configuration automatically, as expected. This is consistent with the newer Azure domain controller that Sam had already identified from my initial discovery result.
 
-Thanks,
+Neal explained that when the legacy domain controllers are decommissioned, their DNS records will be removed, so services using normal Active Directory discovery should subsequently resolve to the remaining available controllers.
+
+He was happy with the OS-level configuration of this VM. However, we checked the installed software and identified ArcGIS components. His concern is that the application itself could potentially have a hardcoded reference to a legacy domain controller, even though the Windows DNS configuration is correct. They identified a possible contact from the ESRI/CRM support team to help confirm the application's configuration.
+
+For **10.186.28.52**, which is the shared VM associated with ADF, we checked the Azure networking settings and confirmed that it also uses the expected DNS resolvers. However, because I couldn't log into the VM, we couldn't verify whether there are any overrides within Windows. I'll follow up internally to establish how we can access it and complete those checks.
+
+We also discussed service ownership, as Neal wants confirmation of who is accountable for the services and any remaining risk before the legacy controllers are decommissioned.
+
+So overall, the checks were positive. The DNS configurations we were able to verify looked as expected, and no incorrect configuration was identified during the call. What remains outstanding is confirming any application-level dependencies, completing the OS checks on the shared VM, and clarifying service ownership.
+
+I've suggested another call for Tuesday so we can follow up on these points once I've gathered more information. I also mentioned that you might be able to join us.
