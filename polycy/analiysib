@@ -1,22 +1,74 @@
+Hi Helen,
 
-Hi Helen, just wanted to give you an update on the call with Neal and Brad.
+I've reviewed Krishna's proposal for the four PPE databases on bst-iaz-sql-ppe-geo against the last 30 days of Azure metrics. I agree we should reduce costs, and most of the direction is right, but I'd adjust some of the target sizes. Summary below.
 
-The call was quite informative, and we went through both VMs to understand the DNS configuration and where the references to the legacy domain controllers might be coming from.
+How serverless billing works (for context): serverless scales automatically between a min and max vCore setting. We pay at least the min 24/7 even when idle; max is the ceiling for peak load. So the min drives the cost, and the max needs to cover the busiest period.
 
-Neal first explained their domain controller infrastructure. He showed the older physical domain controllers, which use the IRD prefix, and said they have five remaining that they're looking to decommission. He also explained the older virtual controllers and the newer Azure-hosted domain controllers.
+1. GeoCuratedData (General Purpose Serverless, max 32 / min 16, auto-pause off)
+• Billed CPU over 30 days = 41.33M vCore-seconds, i.e. 16 vCores constantly. That's the min floor, roughly £7.5k/month, most of the server's cost.
+• Actual usage: CPU near 0% most of the time, with a weekly peak of ~12% (~4 vCores). Data IO and Log IO 0%.
+• Krishna suggested max 4 or 8. Max 4 would run at its ceiling every week, so I'd go with max 8.
+• Proposed: max 8, min 1, auto-pause 1 hour. The weekly job still scales up to what it needs.
+• Note: it has connections every few hours, so auto-pause will only kick in between them. The main saving comes from the min change.
 
-For **10.186.29.87**, we checked the DNS configuration directly on the server. Neal confirmed that the three DNS addresses I shared with you earlier are actually PowerDNS resolvers, rather than legacy domain controllers. These use conditional forwarding to resolve Active Directory requests.
+2. OSMM (General Purpose Serverless, max 8 / min 4, auto-pause off)
+• Billed CPU = 10.33M vCore-seconds, i.e. 4 vCores constantly, roughly £1.9k/month.
+• Weekly CPU peak ~35% of 8 vCores (~3 vCores). Data IO and Log IO 0%. 8 connections in 30 days, none since ~23 Sep.
+• Krishna suggested 2 vCores. That would be below the weekly peak, so I'd go with max 4.
+• Proposed: max 4, lowest available min, auto-pause 1 hour.
 
-We also checked the Windows network adapter and confirmed there was no manual DNS override. The VM is obtaining its DNS configuration automatically, as expected. This is consistent with the newer Azure domain controller that Sam had already identified from my initial discovery result.
+3. GeoLocators (Premium P2, 250 DTU)
+• 0% CPU, Data IO and Log IO over 30 days. 8 connections. 38 MB of data, max size 1 TB.
+• Krishna suggested P1 or General Purpose. P1 would still be heavily oversized.
+• Proposed: General Purpose Serverless, max 1–2 vCores, lowest min, auto-pause 1 hour. With so few connections it would be paused almost all the time, so compute cost would be close to zero.
+• Max size should come down to ~32 GB at the same time, as General Purpose storage is billed on max size, not data used (1 TB would cost ~£170/month for 38 MB of data).
+• Alternative: Standard S0/S1, if the app can't tolerate the ~1 minute resume after a pause. That would also need max size reduced to 250 GB or less.
 
-Neal explained that when the legacy domain controllers are decommissioned, their DNS records will be removed, so services using normal Active Directory discovery should subsequently resolve to the remaining available controllers.
+4. FMEShared (Premium P2, 250 DTU)
+• 0% CPU and IO, and zero connections in the last 30 days. 56 MB of data, max size 500 GB.
+• Question: is this database still needed? If not, we could take a backup/export and remove it.
+• If it is needed: same approach as GeoLocators (Serverless with auto-pause, max size reduced).
 
-He was happy with the OS-level configuration of this VM. However, we checked the installed software and identified ArcGIS components. His concern is that the application itself could potentially have a hardcoded reference to a legacy domain controller, even though the Windows DNS configuration is correct. They identified a possible contact from the ESRI/CRM support team to help confirm the application's configuration.
 
-For **10.186.28.52**, which is the shared VM associated with ADF, we checked the Azure networking settings and confirmed that it also uses the expected DNS resolvers. However, because I couldn't log into the VM, we couldn't verify whether there are any overrides within Windows. I'll follow up internally to establish how we can access it and complete those checks.
 
-We also discussed service ownership, as Neal wants confirmation of who is accountable for the services and any remaining risk before the legacy controllers are decommissioned.
 
-So overall, the checks were positive. The DNS configurations we were able to verify looked as expected, and no incorrect configuration was identified during the call. What remains outstanding is confirming any application-level dependencies, completing the OS checks on the shared VM, and clarifying service ownership.
+Hi Helen,
 
-I've suggested another call for Tuesday so we can follow up on these points once I've gathered more information. I also mentioned that you might be able to join us.
+Following Krishna's email on the bst-iaz-sql-ppe-geo databases, I've had a look at the last 30 days of metrics and the current configuration. Krishna's proposal is a good one; the databases are clearly oversized. I just wanted to give you visibility of a few extra details so the changes deliver the full saving with no impact on the weekly workloads.
+
+How serverless billing works (for context)
+Serverless databases scale automatically between a minimum and maximum vCore setting. We pay for at least the minimum 24/7, even when idle. The maximum is just the ceiling for busy periods and costs nothing unless it's used. So the minimum drives the cost, and the maximum needs to cover the busiest time.
+The lowest minimum the portal allows also depends on the maximum (roughly one-eighth of it), e.g. max 32 allows a min of 4 at the lowest, max 8 allows a min of 1.
+
+1. GeoCuratedData (Serverless, max 32 / min 16)
+• Billed CPU over 30 days equals 16 vCores running constantly (the minimum setting), roughly £7.5k/month and most of the server's cost.
+• CPU is near 0% most of the time, with a weekly peak of ~4 vCores. Data IO and Log IO are 0%.
+• Worth noting: of the two options in Krishna's email, max 8 gives headroom for the weekly peak, and lowering the min alongside it (down to 1) is where most of the saving comes from.
+
+2. OSMM (Serverless, max 8 / min 4)
+• Billed CPU equals 4 vCores running constantly, roughly £1.9k/month.
+• Weekly CPU peak is ~3 vCores. Data IO and Log IO are 0%. 8 connections in 30 days.
+• Worth noting: max 4 rather than 2 would cover the weekly peak, with the min lowered to reduce cost.
+
+3. GeoLocators (Premium P2)
+• 0% CPU and IO over 30 days, 8 connections, 38 MB of data, max size 1 TB.
+• Agree with moving off P2. Given the very low usage, General Purpose Serverless with auto-pause (or a Standard tier) would fit even better than P1.
+• Worth noting: in General Purpose, storage is billed on the max size set, not data used, so reducing the 1 TB max size at the same time avoids ~£170/month in storage. Standard tiers below S3 also cap at 250 GB.
+
+4. FMEShared (Premium P2)
+• 0% CPU and IO, and zero connections in the last 30 days. 56 MB of data, max size 500 GB.
+• Same approach as GeoLocators. It may also be worth confirming whether it's still needed.
+
+Auto-pause
+• Agree with Krishna's suggestion. I've checked, and none of the four databases has geo-replication, failover groups, long-term retention or Data Sync configured, so auto-pause can be used on all of them.
+• The first connection after a pause takes ~1 minute, so the apps need to handle that.
+• GeoCuratedData has connections every few hours, so it would pause less often than the other three.
+
+Other points for visibility
+• The cost analysis screenshot shows £12,473.76 for September, slightly higher than the £11,368 in the email.
+• If PPE is used for performance testing before releases, it's worth planning around the smaller sizes.
+
+In short, Krishna's right that these databases are significantly oversized, and the saving he's aiming for is achievable, likely more than 60–80%. The details above should help make sure we get the full benefit without impacting the weekly workloads.
+
+Thanks,
+Cynthia
