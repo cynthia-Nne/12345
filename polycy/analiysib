@@ -1,74 +1,10 @@
-Hi Helen,
+Hi Helen, following on from above, I've had a look at the prod geo databases (bst-iaz-sql-prd-geo, ~£11.4k/month). Prod is genuinely busy, so it's a different picture from PPE, but there is still a saving:
 
-I've reviewed Krishna's proposal for the four PPE databases on bst-iaz-sql-ppe-geo against the last 30 days of Azure metrics. I agree we should reduce costs, and most of the direction is right, but I'd adjust some of the target sizes. Summary below.
+GeoCuratedData (Serverless, max 32 / min 16): ~£7.9k/month
+• CPU peaked at 60–95% in July and August, so max 32 is justified and shouldn't change.
+• However, App CPU billed shows it's been charged at its 16 vCore minimum almost continuously (e.g. 43.45M vCore-seconds for 16 Aug–16 Sep, against 42.85M for a constant 16). Average CPU use is well under 1 vCore; the peaks are short and handled by scaling.
+• The minimum appears to have been raised from ~4 to 16 around 24 July, at the same time as the max was increased (which was needed, as CPU was hitting 90–100% beforehand).
+• Lowering the min to around 10, with max staying at 32, would save up to ~£2.9k/month (~£35k/year) with no change to peak capacity. Had it been 10 since July, that would have been around £7.5k so far. The trade-off is a slightly smaller minimum cache, so query performance should be monitored afterwards.
 
-How serverless billing works (for context): serverless scales automatically between a min and max vCore setting. We pay at least the min 24/7 even when idle; max is the ceiling for peak load. So the min drives the cost, and the max needs to cover the busiest period.
-
-1. GeoCuratedData (General Purpose Serverless, max 32 / min 16, auto-pause off)
-• Billed CPU over 30 days = 41.33M vCore-seconds, i.e. 16 vCores constantly. That's the min floor, roughly £7.5k/month, most of the server's cost.
-• Actual usage: CPU near 0% most of the time, with a weekly peak of ~12% (~4 vCores). Data IO and Log IO 0%.
-• Krishna suggested max 4 or 8. Max 4 would run at its ceiling every week, so I'd go with max 8.
-• Proposed: max 8, min 1, auto-pause 1 hour. The weekly job still scales up to what it needs.
-• Note: it has connections every few hours, so auto-pause will only kick in between them. The main saving comes from the min change.
-
-2. OSMM (General Purpose Serverless, max 8 / min 4, auto-pause off)
-• Billed CPU = 10.33M vCore-seconds, i.e. 4 vCores constantly, roughly £1.9k/month.
-• Weekly CPU peak ~35% of 8 vCores (~3 vCores). Data IO and Log IO 0%. 8 connections in 30 days, none since ~23 Sep.
-• Krishna suggested 2 vCores. That would be below the weekly peak, so I'd go with max 4.
-• Proposed: max 4, lowest available min, auto-pause 1 hour.
-
-3. GeoLocators (Premium P2, 250 DTU)
-• 0% CPU, Data IO and Log IO over 30 days. 8 connections. 38 MB of data, max size 1 TB.
-• Krishna suggested P1 or General Purpose. P1 would still be heavily oversized.
-• Proposed: General Purpose Serverless, max 1–2 vCores, lowest min, auto-pause 1 hour. With so few connections it would be paused almost all the time, so compute cost would be close to zero.
-• Max size should come down to ~32 GB at the same time, as General Purpose storage is billed on max size, not data used (1 TB would cost ~£170/month for 38 MB of data).
-• Alternative: Standard S0/S1, if the app can't tolerate the ~1 minute resume after a pause. That would also need max size reduced to 250 GB or less.
-
-4. FMEShared (Premium P2, 250 DTU)
-• 0% CPU and IO, and zero connections in the last 30 days. 56 MB of data, max size 500 GB.
-• Question: is this database still needed? If not, we could take a backup/export and remove it.
-• If it is needed: same approach as GeoLocators (Serverless with auto-pause, max size reduced).
-
-
-
-
-Hi Helen,
-
-Following Krishna's email on the bst-iaz-sql-ppe-geo databases, I've had a look at the last 30 days of metrics and the current configuration. Krishna's proposal is a good one; the databases are clearly oversized. I just wanted to give you visibility of a few extra details so the changes deliver the full saving with no impact on the weekly workloads.
-
-How serverless billing works (for context)
-Serverless databases scale automatically between a minimum and maximum vCore setting. We pay for at least the minimum 24/7, even when idle. The maximum is just the ceiling for busy periods and costs nothing unless it's used. So the minimum drives the cost, and the maximum needs to cover the busiest time.
-The lowest minimum the portal allows also depends on the maximum (roughly one-eighth of it), e.g. max 32 allows a min of 4 at the lowest, max 8 allows a min of 1.
-
-1. GeoCuratedData (Serverless, max 32 / min 16)
-• Billed CPU over 30 days equals 16 vCores running constantly (the minimum setting), roughly £7.5k/month and most of the server's cost.
-• CPU is near 0% most of the time, with a weekly peak of ~4 vCores. Data IO and Log IO are 0%.
-• Worth noting: of the two options in Krishna's email, max 8 gives headroom for the weekly peak, and lowering the min alongside it (down to 1) is where most of the saving comes from.
-
-2. OSMM (Serverless, max 8 / min 4)
-• Billed CPU equals 4 vCores running constantly, roughly £1.9k/month.
-• Weekly CPU peak is ~3 vCores. Data IO and Log IO are 0%. 8 connections in 30 days.
-• Worth noting: max 4 rather than 2 would cover the weekly peak, with the min lowered to reduce cost.
-
-3. GeoLocators (Premium P2)
-• 0% CPU and IO over 30 days, 8 connections, 38 MB of data, max size 1 TB.
-• Agree with moving off P2. Given the very low usage, General Purpose Serverless with auto-pause (or a Standard tier) would fit even better than P1.
-• Worth noting: in General Purpose, storage is billed on the max size set, not data used, so reducing the 1 TB max size at the same time avoids ~£170/month in storage. Standard tiers below S3 also cap at 250 GB.
-
-4. FMEShared (Premium P2)
-• 0% CPU and IO, and zero connections in the last 30 days. 56 MB of data, max size 500 GB.
-• Same approach as GeoLocators. It may also be worth confirming whether it's still needed.
-
-Auto-pause
-• Agree with Krishna's suggestion. I've checked, and none of the four databases has geo-replication, failover groups, long-term retention or Data Sync configured, so auto-pause can be used on all of them.
-• The first connection after a pause takes ~1 minute, so the apps need to handle that.
-• GeoCuratedData has connections every few hours, so it would pause less often than the other three.
-
-Other points for visibility
-• The cost analysis screenshot shows £12,473.76 for September, slightly higher than the £11,368 in the email.
-• If PPE is used for performance testing before releases, it's worth planning around the smaller sizes.
-
-In short, Krishna's right that these databases are significantly oversized, and the saving he's aiming for is achievable, likely more than 60–80%. The details above should help make sure we get the full benefit without impacting the weekly workloads.
-
-Thanks,
-Cynthia
+GeoLocators (Premium P2)
+• Idle in prod (0% CPU/IO over 30 days), so moving to P1 would roughly halve its cost while staying on Premium.
